@@ -1,0 +1,33 @@
+{
+  "name": "shotx",
+  "version": "1.0.2",
+  "description": "🚅 Shotx - Powerful real-time communication library.",
+  "main": "index.mjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clasen/Shotx.git"
+  },
+  "keywords": [
+    "realtime",
+    "communication",
+    "websocket",
+    "client",
+    "server",
+    "socket.io",
+    "networking",
+    "events",
+    "messaging"
+  ],
+  "author": "Martin Clasen",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/clasen/Shotx/issues"
+  },
+  "homepage": "https://github.com/clasen/Shotx#readme",
+  "dependencies": {
+    "lemonlog": "^1.1.4",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "uuid": "^11.0.5"
+  }
+}
