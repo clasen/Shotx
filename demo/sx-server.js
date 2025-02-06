@@ -1,5 +1,5 @@
 import { createServer } from 'http';
-import { SxServer } from '../index.mjs';
+import { SxServer } from '../index.js';
 
 const httpServer = createServer();
 const sxServer = new SxServer({ httpServer });

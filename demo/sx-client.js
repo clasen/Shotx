@@ -1,4 +1,4 @@
-import { SxClient } from '../index.mjs';
+import { SxClient } from '../index.js';
 
 const client = new SxClient({ token: 'valid' });
 const login = await client.connect();
