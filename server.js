@@ -3,17 +3,23 @@ import LemonLog from 'lemonlog';
 
 const log = new LemonLog("SxServer");
 
-export class SxServer {
+export default class SxServer {
     /**
      * Initialize the socket server
      * @param {Object} args - Configuration arguments
      * @param {http.Server} args.httpServer - HTTP server to use for Socket.IO
      */
-    constructor({ httpServer } = {}) {
+    constructor({ httpServer, cors } = {}) {
         if (!httpServer) {
             throw new Error('HTTP server must be provided');
         }
-        this.io = new Server(httpServer);
+        this.io = new Server(httpServer, {
+            cors: cors || {
+                origin: '*',
+                methods: ['GET', 'POST']
+            }
+        });
+
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
 
@@ -70,11 +76,11 @@ export class SxServer {
      */
     setupListeners() {
         this.io.on('connection', (socket) => {
-            log.info(`SERVER <-- [${socket.id}] Cliente conectado`);
-            
+            log.info(`<-- [${socket.id}] Cliente conectado`);
+
             // Enviar información de auth al cliente
             socket.emit('auth_success', socket.auth);
-            
+
             // Listener para mensajes con enrutamiento basado en tipo
             socket.on('message', async (message, callback) => {
                 await this.handleMessage(socket, message, callback);
@@ -82,12 +88,12 @@ export class SxServer {
 
             // Listener para desconexión
             socket.on('disconnect', () => {
-                log.info(`SERVER <-- [${socket.id}] Cliente desconectado`);
+                log.info(`<-- [${socket.id}] Cliente desconectado`);
             });
 
             // Listener para errores
             socket.on('error', (error) => {
-                log.error(`SERVER <-- [${socket.id}] Error:`, error);
+                log.error(`<-- [${socket.id}] Error:`, error);
             });
         });
     }
@@ -113,7 +119,7 @@ export class SxServer {
                 return callback({ meta: { success: false, error: 'Invalid message type' }, data: null });
             }
 
-            log.info(`SERVER <-- [${socket.id}] - ${meta.type}`, message);
+            log.info(`<-- [${socket.id}] - ${meta.type}`, message);
 
             const handler = this.messageHandlers.get(meta.type);
             if (!handler) {
@@ -123,7 +129,7 @@ export class SxServer {
             const result = await handler(socket, data);
             callback({ meta: { success: true }, data: result });
         } catch (error) {
-            log.error(`SERVER <-- [${socket.id}] Error al procesar el mensaje:`, error);
+            log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
             callback({ meta: { success: false, error: error.message || 'Error processing message' }, data: null });
         }
     }

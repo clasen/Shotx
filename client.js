@@ -4,7 +4,7 @@ import { v7 as uuidv7 } from 'uuid';
 
 const log = new LemonLog("SxClient");
 
-export class SxClient {
+export default class SxClient {
     constructor(args = {}) {
         this.url = args.url || 'http://localhost:3000';
         this.token = args.token || uuidv7();
@@ -23,7 +23,7 @@ export class SxClient {
         
         // If offline, queue the message
         if (!this.isConnected) {
-            log.info('CLIENT --> Offline. Queuing message:', data);
+            log.info('--> Offline. Queuing message:', data);
             this.offlineQueue.push({ eventName, data, meta });
             return;
         }
@@ -36,7 +36,7 @@ export class SxClient {
     _emitMessage(eventName, data, meta = {}) {
         return new Promise((resolve, reject) => {
             const message = { meta, data };
-            log.info(`CLIENT --> Sending:`, message);
+            log.info(`--> Sending:`, message);
 
             // Emit event to server
             this.socket.emit(eventName, message, (response) => {
@@ -56,7 +56,7 @@ export class SxClient {
     async processQueue() {
         if (!this.isConnected) return;
         if (this.offlineQueue.length > 0) {
-            log.info(`CLIENT --> Processing offline queue (${this.offlineQueue.length} messages).`);
+            log.info(`--> Processing offline queue (${this.offlineQueue.length} messages).`);
         }
 
         while (this.offlineQueue.length > 0) {
@@ -64,7 +64,7 @@ export class SxClient {
             try {
                 await this._emitMessage(eventName, data, meta);
             } catch (error) {
-                log.error('CLIENT --> Error sending offline message:', error);
+                log.error('--> Error sending offline message:', error);
             }
         }
     }
@@ -79,17 +79,17 @@ export class SxClient {
             this.socket = io(this.url, { auth: { token: this.token } });
 
             this.socket.on('connect', () => {
-                log.info('CLIENT --> Connected to server');
+                log.info('--> Connected to server');
                 this.isConnected = true;
             });
 
             this.socket.on('connect_error', (error) => {
-                log.error('CLIENT --> Connection error:', error.message);
+                log.error('--> Connection error:', error.message);
                 this.isConnected = false;
             });
 
             this.socket.on('auth_success', (data) => {
-                log.info('CLIENT --> auth success:', data);
+                log.info('--> auth success:', data);
                 this.processQueue();
                 resolve(data);
             });
@@ -102,7 +102,7 @@ export class SxClient {
 
     disconnect() {
         if (this.socket) {
-            log.info('CLIENT --> Disconnecting');
+            log.info('--> Disconnecting');
             this.isConnected = false;
             this.socket.disconnect();
             this.socket = null;

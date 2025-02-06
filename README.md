@@ -45,13 +45,14 @@ httpServer.listen(3000, () => {
 The client component manages the socket connection, performs authentication, and queues messages if offline.
 
 ``` javascript
-import { SxClient } from 'shotx';
+import SxClient from 'shotx/client';
 
 const client = new SxClient({ token: 'valid' });
 
 const login = await client.connect();
 console.log('Client logged in:', login);
 let messageCount = 0;
+
 // Periodically send messages to the server every 500ms
 setInterval(async () => {
     messageCount++;
@@ -70,7 +71,7 @@ The `SxServer` class provides a framework for building the server side of your r
 
 **Constructor**
 ```javascript
-new SxServer({ httpServer, db })
+new SxServer({ httpServer })
 ```
 - `httpServer` (required): An instance of an HTTP server that Socket.IO will attach to.
 

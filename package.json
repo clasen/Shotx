@@ -1,9 +1,14 @@
 {
   "name": "shotx",
-  "version": "1.1.2",
+  "version": "1.1.4",
   "description": "🚅 Shotx - Powerful real-time communication library.",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./server": "./server.js",
+    "./client": "./client.js"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/clasen/Shotx.git"
