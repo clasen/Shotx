@@ -9,16 +9,21 @@ export default class SxServer {
      * @param {Object} args - Configuration arguments
      * @param {http.Server} args.httpServer - HTTP server to use for Socket.IO
      */
-    constructor({ httpServer, cors } = {}) {
+    constructor({ httpServer, opts } = {}) {
         if (!httpServer) {
             throw new Error('HTTP server must be provided');
         }
-        this.io = new Server(httpServer, {
-            cors: cors || {
+
+        opts = opts || {};
+
+        if (!opts.cors) {
+            opts.cors = {
                 origin: '*',
                 methods: ['GET', 'POST']
             }
-        });
+        }
+
+        this.io = new Server(httpServer, opts);
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
