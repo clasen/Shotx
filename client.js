@@ -5,9 +5,9 @@ import { v7 as uuidv7 } from 'uuid';
 const log = new LemonLog("SxClient");
 
 export default class SxClient {
-    constructor(args = {}) {
-        this.url = args.url || 'http://localhost:3000';
-        this.token = args.token || uuidv7();
+    constructor({ url, token } = {}) {
+        this.url = url || 'http://localhost:3000';
+        this.token = token || uuidv7();
         this.socket = null;
         this.isConnected = false;
         this.offlineQueue = [];
@@ -36,7 +36,7 @@ export default class SxClient {
     _emitMessage(eventName, data, meta = {}) {
         return new Promise((resolve, reject) => {
             const message = { meta, data };
-            log.info(`--> Sending:`, message);
+            log.info(`--> emit: ${eventName}`, message);
 
             // Emit event to server
             this.socket.emit(eventName, message, (response) => {
@@ -56,7 +56,7 @@ export default class SxClient {
     async processQueue() {
         if (!this.isConnected) return;
         if (this.offlineQueue.length > 0) {
-            log.info(`--> Processing offline queue (${this.offlineQueue.length} messages).`);
+            log.info(`--> processQueue (${this.offlineQueue.length} messages).`);
         }
 
         while (this.offlineQueue.length > 0) {
@@ -64,7 +64,7 @@ export default class SxClient {
             try {
                 await this._emitMessage(eventName, data, meta);
             } catch (error) {
-                log.error('--> Error sending offline message:', error);
+                log.error('--> Error processQueue', error);
             }
         }
     }
@@ -92,10 +92,6 @@ export default class SxClient {
                 log.info('--> auth success:', data);
                 this.processQueue();
                 resolve(data);
-            });
-
-            this.socket.on('new_message', (message) => {
-                log.info('CLIENT <-- new_message:', message);
             });
         });
     }
