@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.1.6",
+  "version": "1.2.4",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
@@ -22,7 +22,8 @@
     "socket.io",
     "networking",
     "events",
-    "messaging"
+    "messaging",
+    "clasen"
   ],
   "author": "Martin Clasen",
   "license": "MIT",

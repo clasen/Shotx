@@ -4,11 +4,7 @@ import LemonLog from 'lemonlog';
 const log = new LemonLog("SxServer");
 
 export default class SxServer {
-    /**
-     * Initialize the socket server
-     * @param {Object} args - Configuration arguments
-     * @param {http.Server} args.httpServer - HTTP server to use for Socket.IO
-     */
+
     constructor({ httpServer, opts } = {}) {
         if (!httpServer) {
             throw new Error('HTTP server must be provided');
@@ -33,14 +29,14 @@ export default class SxServer {
             try {
                 const token = socket.handshake?.auth?.token;
                 if (!token) {
-                    return next(new Error("Authentication token not provided"));
+                    return next(new Error('AUTH_NULL'));
                 }
                 const auth = await this.authHandler(token, socket);
                 if (auth) {
                     socket.auth = auth;
                     next();
                 } else {
-                    return next(new Error("Invalid authentication token"));
+                    return next(new Error('AUTH_FAIL'));
                 }
             } catch (error) {
                 next(error);
@@ -81,22 +77,22 @@ export default class SxServer {
      */
     setupListeners() {
         this.io.on('connection', (socket) => {
-            log.info(`<-- [${socket.id}] Cliente conectado`);
+            log.info(`<-- [${socket.id}] Client connected`);
 
-            // Enviar información de auth al cliente
+            // Send auth information to client
             socket.emit('auth_success', socket.auth);
 
-            // Listener para mensajes con enrutamiento basado en tipo
+            // Listener for messages with type-based routing
             socket.on('message', async (message, callback) => {
                 await this.handleMessage(socket, message, callback);
             });
 
-            // Listener para desconexión
+            // Listener for disconnection
             socket.on('disconnect', () => {
-                log.info(`<-- [${socket.id}] Cliente desconectado`);
+                log.info(`<-- [${socket.id}] Client disconnected`);
             });
 
-            // Listener para errores
+            // Listener for errors
             socket.on('error', (error) => {
                 log.error(`<-- [${socket.id}] Error:`, error);
             });
@@ -112,30 +108,30 @@ export default class SxServer {
      */
     async handleMessage(socket, message, callback) {
         try {
-            // Validar que el mensaje es un objeto
+            // Validate that message is an object
             if (!message || typeof message !== 'object') {
-                return callback({ meta: { success: false, error: 'Invalid message format' }, data: null });
+                return callback({ meta: { success: false, code: 2001, error: 'Invalid message format' }, data: null });
             }
 
             const { meta, data } = message;
 
-            // Validar que meta existe y que posee un tipo de mensaje válido
+            // Validate that meta exists and has a valid message type
             if (!meta || typeof meta.type !== 'string') {
-                return callback({ meta: { success: false, error: 'Invalid message type' }, data: null });
+                return callback({ meta: { success: false, code: 2002, error: 'Invalid message type' }, data: null });
             }
 
             log.info(`<-- [${socket.id}] - ${meta.type}`, message);
 
             const handler = this.messageHandlers.get(meta.type);
             if (!handler) {
-                return callback({ meta: { success: false, error: `Unknown message type: ${meta.type}` }, data: null });
+                return callback({ meta: { success: false, code: 2003, error: `Unknown message type: ${meta.type}` }, data: null });
             }
 
             const result = await handler(socket, data);
             callback({ meta: { success: true }, data: result });
         } catch (error) {
             log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
-            callback({ meta: { success: false, error: error.message || 'Error processing message' }, data: null });
+            callback({ meta: { success: false, code: 2004, error: error.message || 'Error processing message' }, data: null });
         }
     }
 }

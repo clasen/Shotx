@@ -47,9 +47,10 @@ The client component manages the socket connection, performs authentication, and
 ``` javascript
 import SxClient from 'shotx/client';
 
-const client = new SxClient({ token: 'valid' });
+const client = new SxClient();
 
-const login = await client.connect();
+const login = await client.connect('valid');
+
 console.log('Client logged in:', login);
 let messageCount = 0;
 

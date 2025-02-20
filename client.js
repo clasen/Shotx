@@ -5,9 +5,8 @@ import { v7 as uuidv7 } from 'uuid';
 const log = new LemonLog("SxClient");
 
 export default class SxClient {
-    constructor({ url, token } = {}) {
+    constructor({ url } = {}) {
         this.url = url || 'http://localhost:3000';
-        this.token = token || uuidv7();
         this.socket = null;
         this.isConnected = false;
         this.offlineQueue = [];
@@ -70,26 +69,29 @@ export default class SxClient {
     }
 
     // Connect to the server with a token
-    async connect() {
+    async connect(token) {
         if (this.isConnected) {
             return;
         }
 
+        token = token ?? uuidv7();
+
         return new Promise((resolve, reject) => {
-            this.socket = io(this.url, { auth: { token: this.token } });
+            this.socket = io(this.url, { auth: { token } });
 
             this.socket.on('connect', () => {
-                log.info('--> Connected to server');
+                log.info('--> connect');
                 this.isConnected = true;
             });
 
             this.socket.on('connect_error', (error) => {
-                log.error('--> Connection error:', error.message);
+                log.error('--> connect_error', error);
                 this.isConnected = false;
+                reject(error);
             });
 
             this.socket.on('auth_success', (data) => {
-                log.info('--> auth success:', data);
+                log.info('--> auth_success', data);
                 this.processQueue();
                 resolve(data);
             });

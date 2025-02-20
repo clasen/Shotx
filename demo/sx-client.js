@@ -1,8 +1,13 @@
 import SxClient from '../client.js';
 
-const client = new SxClient({ token: 'valid' });
-const login = await client.connect();
-console.log('CLIENT --> Login:', login);
+const client = new SxClient();
+try {
+    const login = await client.connect('valid');
+    console.log('CLIENT --> Login:', login);
+
+} catch (error) {
+    console.error('CLIENT --> ', error.message == 'AUTH_FAIL' ? 'Invalid token' : error.message);
+}
 
 let messageCount = 0; // Add counter variable
 
