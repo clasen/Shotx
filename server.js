@@ -29,6 +29,7 @@ export default class SxServer {
             try {
                 const token = socket.handshake?.auth?.token;
                 if (!token) {
+                    log.warn(`<-- [${socket.id}] Authentication failed: No token provided`);
                     return next(new Error('AUTH_NULL'));
                 }
                 const auth = await this.authHandler(token, socket);
@@ -36,9 +37,11 @@ export default class SxServer {
                     socket.auth = auth;
                     next();
                 } else {
+                    log.warn(`<-- [${socket.id}] Authentication failed: Invalid credentials`);
                     return next(new Error('AUTH_FAIL'));
                 }
             } catch (error) {
+                log.error(`<-- [${socket.id}] Authentication error:`, error);
                 next(error);
             }
         });
