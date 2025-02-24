@@ -19,10 +19,10 @@ export default class SxClient {
     async emit(eventName, data, meta = {}) {
         // Add UUID to meta
         meta.id = uuidv7();
-        
+
         // If offline, queue the message
         if (!this.isConnected) {
-            log.info('--> Offline. Queuing message:', data);
+            log.info('> Offline. Queuing message:', data);
             this.offlineQueue.push({ eventName, data, meta });
             return;
         }
@@ -35,7 +35,7 @@ export default class SxClient {
     _emitMessage(eventName, data, meta = {}) {
         return new Promise((resolve, reject) => {
             const message = { meta, data };
-            log.info(`--> emit: ${eventName}`, message);
+            log.info(`> emit: ${eventName}`, message);
 
             // Emit event to server
             this.socket.emit(eventName, message, (response) => {
@@ -55,7 +55,7 @@ export default class SxClient {
     async processQueue() {
         if (!this.isConnected) return;
         if (this.offlineQueue.length > 0) {
-            log.info(`--> processQueue (${this.offlineQueue.length} messages).`);
+            log.info(`> processQueue (${this.offlineQueue.length} messages).`);
         }
 
         while (this.offlineQueue.length > 0) {
@@ -63,7 +63,7 @@ export default class SxClient {
             try {
                 await this._emitMessage(eventName, data, meta);
             } catch (error) {
-                log.error('--> Error processQueue', error);
+                log.error('> Error processQueue', error);
             }
         }
     }
@@ -77,21 +77,22 @@ export default class SxClient {
         token = token ?? uuidv7();
 
         return new Promise((resolve, reject) => {
+
             this.socket = io(this.url, { auth: { token } });
 
             this.socket.on('connect', () => {
-                log.info('--> connect');
+                log.info('> connect');
                 this.isConnected = true;
             });
 
             this.socket.on('connect_error', (error) => {
-                log.error('--> connect_error', error);
+                log.warn('> connect_error', error.message);
                 this.isConnected = false;
-                reject(error);
+                reject(new Error(error.message == 'xhr poll error' ? 'NO_CONNECTION' : error.message));
             });
 
             this.socket.on('auth_success', (data) => {
-                log.info('--> auth_success', data);
+                log.info('> auth_success', data);
                 this.processQueue();
                 resolve(data);
             });
@@ -100,7 +101,7 @@ export default class SxClient {
 
     disconnect() {
         if (this.socket) {
-            log.info('--> Disconnecting');
+            log.info('> Disconnecting');
             this.isConnected = false;
             this.socket.disconnect();
             this.socket = null;

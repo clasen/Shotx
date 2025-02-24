@@ -1,8 +1,8 @@
 import { createServer } from 'http';
 import { SxServer } from '../index.js';
 
-const httpServer = createServer();
-const sxServer = new SxServer({ httpServer });
+const server = createServer();
+const sxServer = new SxServer({ server });
 
 sxServer
     .setAuthHandler(async (token, socket) => {
@@ -12,6 +12,6 @@ sxServer
         return { status: 'ok', data, auth: socket.auth };
     });
 
-httpServer.listen(3000, () => {
+server.listen(3000, () => {
     console.log('Server running at http://localhost:3000');
 });

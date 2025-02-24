@@ -20,22 +20,22 @@ The server component creates a Socket.IO server and allows you to set up a custo
 ``` javascript
 // server.js
 import { createServer } from 'http';
-import { SxServer } from 'shotx';
+import SxServer from 'shotx/server';
 
-const httpServer = createServer();
-const sxServer = new SxServer({ httpServer });
+const server = createServer();
+const sxServer = new SxServer({ server });
 // Set a custom authentication handler and register a 'read' message handler
 sxServer
 .setAuthHandler(async (token, socket) => {
     // Validate token using your preferred logic or database
-    return token == 'valid' ? {} : null;
+    return token == 'valid' ? { sucess:'ok' } : null;
 })
 .onMessage('test_route', async (socket, data) => {
     // Handle the "read" message type
     return { status: 'ok', data, auth: socket.auth };
 });
 
-httpServer.listen(3000, () => {
+server.listen(3000, () => {
     console.log('Server running at http://localhost:3000');
 });
 ```
@@ -49,9 +49,13 @@ import SxClient from 'shotx/client';
 
 const client = new SxClient();
 
-const login = await client.connect('valid');
+try {
+    const login = await client.connect('valid');
+    console.log('CLIENT --> Login:', login); // { sucess:'ok' }
+} catch (error) {
+    console.error('CLIENT --> ', error.message == 'AUTH_FAIL' ? 'Invalid token' : error.message);
+}
 
-console.log('Client logged in:', login);
 let messageCount = 0;
 
 // Periodically send messages to the server every 500ms
@@ -72,9 +76,9 @@ The `SxServer` class provides a framework for building the server side of your r
 
 **Constructor**
 ```javascript
-new SxServer({ httpServer })
+new SxServer({ server })
 ```
-- `httpServer` (required): An instance of an HTTP server that Socket.IO will attach to.
+- `server` (required): An instance of an HTTP(s) server that Socket.IO will attach to.
 
 **Methods**
 

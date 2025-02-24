@@ -5,9 +5,9 @@ const log = new LemonLog("SxServer");
 
 export default class SxServer {
 
-    constructor({ httpServer, opts } = {}) {
-        if (!httpServer) {
-            throw new Error('HTTP server must be provided');
+    constructor({ server, opts } = {}) {
+        if (!server) {
+            throw new Error('HTTP(s) server must be provided');
         }
 
         opts = opts || {};
@@ -19,7 +19,7 @@ export default class SxServer {
             }
         }
 
-        this.io = new Server(httpServer, opts);
+        this.io = new Server(server, opts);
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
@@ -29,7 +29,7 @@ export default class SxServer {
             try {
                 const token = socket.handshake?.auth?.token;
                 if (!token) {
-                    log.warn(`<-- [${socket.id}] Authentication failed: No token provided`);
+                    log.warn(`<-- [${socket.id}] (AUTH_NULL) Authentication failed: No token provided`);
                     return next(new Error('AUTH_NULL'));
                 }
                 const auth = await this.authHandler(token, socket);
@@ -37,12 +37,12 @@ export default class SxServer {
                     socket.auth = auth;
                     next();
                 } else {
-                    log.warn(`<-- [${socket.id}] Authentication failed: Invalid credentials`);
+                    log.warn(`<-- [${socket.id}] (AUTH_FAIL) Authentication failed: Invalid credentials`);
                     return next(new Error('AUTH_FAIL'));
                 }
             } catch (error) {
-                log.error(`<-- [${socket.id}] Authentication error:`, error);
-                next(error);
+                log.error(`<-- [${socket.id}] (AUTH_ERROR) Authentication error`, error);
+                next(new Error('AUTH_ERROR'));
             }
         });
 
