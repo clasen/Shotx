@@ -98,39 +98,52 @@ export default class SxClient {
 
         token = token ?? uuidv7();
 
-        return new Promise((resolve, reject) => {
-
-            this.socket = io(this.url, { auth: { token } });
-
-            this.socket.on('connect', () => {
-                log.info('> connect');
-                this.isConnected = true;
-            });
-
-            this.socket.on('connect_error', (error) => {
-                log.warn('> connect_error', error.message);
-                this.isConnected = false;
-                reject(new Error(error.message == 'xhr poll error' ? 'NO_CONNECTION' : error.message));
-            });
-
-            this.socket.on('disconnect', () => {
-                log.info('> disconnect');
-                this.isConnected = false;
-            });
-
-            // Handle reconnection
-            this.socket.on('connect', async () => {
-                if (this.joinedRooms.size > 0) {
-                    log.info('> Reconnected - will rejoin rooms after auth');
+        return new Promise((resolve) => {
+            let retryCount = 0;
+            const maxRetryDelay = 30000; // Max 30 seconds
+            
+            const attemptConnection = () => {
+                if (this.socket) {
+                    this.socket.disconnect();
                 }
-            });
 
-            this.socket.on('auth_success', async (data) => {
-                log.info('> auth_success', data);
-                await this.processQueue();
-                await this.rejoinRooms();
-                resolve(data);
-            });
+                this.socket = io(this.url, { 
+                    auth: { token },
+                    autoConnect: true,
+                    reconnection: true,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: maxRetryDelay,
+                    maxReconnectionAttempts: Infinity
+                });
+
+                this.socket.on('connect', () => {
+                    log.info('> connect');
+                    this.isConnected = true;
+                    retryCount = 0; // Reset retry count on successful connection
+                });
+
+                this.socket.on('connect_error', (error) => {
+                    retryCount++;
+                    const delay = Math.min(1000 * Math.pow(2, retryCount - 1), maxRetryDelay);
+                    log.warn(`> connect_error (attempt ${retryCount}): ${error.message}, retrying in ${delay}ms`);
+                    this.isConnected = false;
+                    // Don't reject, let Socket.IO handle reconnection
+                });
+
+                this.socket.on('disconnect', () => {
+                    log.info('> disconnect');
+                    this.isConnected = false;
+                });
+
+                this.socket.on('auth_success', async (data) => {
+                    log.info('> auth_success', data);
+                    await this.processQueue();
+                    await this.rejoinRooms();
+                    resolve(data);
+                });
+            };
+
+            attemptConnection();
         });
     }
 
