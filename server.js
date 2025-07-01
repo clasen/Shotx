@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import LemonLog from 'lemonlog';
+import DeepBase from 'deepbase';
 
 const log = new LemonLog("SxServer");
 
@@ -23,6 +24,7 @@ export default class SxServer {
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
+        this.db = new DeepBase();
 
         // Configurar middleware de autenticación
         this.io.use(async (socket, next) => {
@@ -61,12 +63,6 @@ export default class SxServer {
         return {};
     }
 
-    /**
-     * Registers a handler for a message type
-     * @param {string} type - Message type
-     * @param {Function} handler - Handler function for the message
-     * @returns {SxServer} - Instance for chaining
-     */
     onMessage(type, handler) {
         if (typeof type !== 'string' || typeof handler !== 'function') {
             throw new Error('Invalid parameters for onMessage');
@@ -75,9 +71,6 @@ export default class SxServer {
         return this;
     }
 
-    /**
-     * Sets up Socket.IO listeners for connection, messages, disconnection and errors
-     */
     setupListeners() {
         this.io.on('connection', (socket) => {
             log.info(`<-- [${socket.id}] Client connected`);
@@ -100,15 +93,21 @@ export default class SxServer {
                 log.error(`<-- [${socket.id}] Error:`, error);
             });
         });
+
+        // Listener for join room
+        this.onMessage('_room_join', async (socket, data) => {
+            socket.join(data.room);
+            log.info(`<-- [${socket.id}] Joined room: ${data.room}`);
+            this.processRoomMessages(data.room);
+        });
+
+        // Listener for leave room
+        this.onMessage('_room_leave', async (socket, data) => {
+            socket.leave(data.room);
+            log.info(`<-- [${socket.id}] Left room: ${data.room}`);
+        });
     }
 
-    /**
-     * Handles incoming message processing
-     * Validates message structure, routes by type, and responds via callback
-     * @param {SocketIO.Socket} socket - Client socket
-     * @param {Object} message - Received message
-     * @param {Function} callback - Callback function for response
-     */
     async handleMessage(socket, message, callback) {
         try {
             // Validate that message is an object
@@ -135,6 +134,65 @@ export default class SxServer {
         } catch (error) {
             log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
             callback({ meta: { success: false, code: 2004, error: error.message || 'Error processing message' }, data: null });
+        }
+    }
+
+    /**
+     * Send message to a specific room
+     * @param {string} room - Room name
+     * @returns {Object} - Object with send method
+     */
+    to(room) {
+        return {
+            send: (type, data) => {
+                const message = {
+                    meta: { type },
+                    data
+                };
+
+                // Check if room has connected clients
+                const roomSockets = this.io.sockets.adapter.rooms.get(room);
+
+                if (roomSockets && roomSockets.size > 0) {
+                    // Room has connected clients, send message immediately
+                    log.info(`--> [room:${room}] Sending message: ${type}`, message);
+                    this.io.to(room).emit('message', message);
+                } else {
+                    // Room is offline, persist the message
+                    log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
+                    this.db.add(room, { type, data });
+                }
+            }
+        };
+    }
+
+    /**
+     * Process pending messages for a room when a client joins
+     * @param {string} room - Room name
+     */
+    async processRoomMessages(room) {
+        try {
+            const pendingMessages = await this.db.values(room) || [];
+
+            console.log(pendingMessages);
+            if (pendingMessages.length > 0) {
+                log.info(`--> [room:${room}] Processing ${pendingMessages.length} pending messages`);
+
+                for (const msg of pendingMessages) {
+                    const message = {
+                        meta: { type: msg.type },
+                        data: msg.data
+                    };
+
+                    this.io.to(room).emit('message', message);
+                    log.info(`--> [room:${room}] Sent pending message: ${msg.type}`, message);
+                }
+
+                // Clear processed messages
+                this.db.del(room);
+            }
+        } catch (error) {
+            log.error(`Error processing room messages for ${room}:`, error);
         }
     }
 }

@@ -10,6 +10,7 @@ export default class SxClient {
         this.socket = null;
         this.isConnected = false;
         this.offlineQueue = [];
+        this.joinedRooms = new Set(); // Track joined rooms for reconnection
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -68,6 +69,27 @@ export default class SxClient {
         }
     }
 
+    // Rejoin all previously joined rooms after reconnection
+    async rejoinRooms() {
+        if (!this.isConnected || this.joinedRooms.size === 0) return;
+
+        log.info(`> Rejoining ${this.joinedRooms.size} rooms after reconnection`);
+
+        for (const room of this.joinedRooms) {
+            try {
+                await this._joinRoom(room);
+                log.info(`> Rejoined room: ${room}`);
+            } catch (error) {
+                log.error(`> Failed to rejoin room ${room}:`, error);
+            }
+        }
+    }
+
+    // Internal method to join room without tracking
+    async _joinRoom(room) {
+        return this.send('_room_join', { room });
+    }
+
     // Connect to the server with a token
     async connect(token) {
         if (this.isConnected) {
@@ -91,9 +113,22 @@ export default class SxClient {
                 reject(new Error(error.message == 'xhr poll error' ? 'NO_CONNECTION' : error.message));
             });
 
-            this.socket.on('auth_success', (data) => {
+            this.socket.on('disconnect', () => {
+                log.info('> disconnect');
+                this.isConnected = false;
+            });
+
+            // Handle reconnection
+            this.socket.on('connect', async () => {
+                if (this.joinedRooms.size > 0) {
+                    log.info('> Reconnected - will rejoin rooms after auth');
+                }
+            });
+
+            this.socket.on('auth_success', async (data) => {
                 log.info('> auth_success', data);
-                this.processQueue();
+                await this.processQueue();
+                await this.rejoinRooms();
                 resolve(data);
             });
         });
@@ -111,5 +146,36 @@ export default class SxClient {
     async send(type, data) {
         const meta = { type };
         return this.emit(this.routeEvent, data, meta);
+    }
+
+    async join(room) {
+        const result = await this._joinRoom(room);
+        this.joinedRooms.add(room); // Track joined room
+        log.info(`> Joined room: ${room}`);
+        return result;
+    }
+
+    async leave(room) {
+        const result = await this.send('_room_leave', { room });
+        this.joinedRooms.delete(room); // Remove from tracked rooms
+        log.info(`> Left room: ${room}`);
+        return result;
+    }
+
+    onMessage(route, handler) {
+        if (!this.socket) {
+            log.warn('> Cannot set message handler - not connected');
+            return;
+        }
+
+        this.socket.on(this.routeEvent, async (message) => {
+            if (message.meta && message.meta.type === route) {
+                try {
+                    await handler(this.socket, message.data);
+                } catch (error) {
+                    log.error(`> Error in message handler for route ${route}:`, error);
+                }
+            }
+        });
     }
 } 
