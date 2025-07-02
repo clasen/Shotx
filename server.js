@@ -24,7 +24,7 @@ export default class SxServer {
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
-        this.db = new DeepBase();
+        this.db = new DeepBase({ name: 'shotx' });
 
         // Configurar middleware de autenticación
         this.io.use(async (socket, next) => {
@@ -95,14 +95,14 @@ export default class SxServer {
         });
 
         // Listener for join room
-        this.onMessage('_room_join', async (socket, data) => {
+        this.onMessage('sx_join', async (socket, data) => {
             socket.join(data.room);
             log.info(`<-- [${socket.id}] Joined room: ${data.room}`);
             this.processRoomMessages(data.room);
         });
 
         // Listener for leave room
-        this.onMessage('_room_leave', async (socket, data) => {
+        this.onMessage('sx_leave', async (socket, data) => {
             socket.leave(data.room);
             log.info(`<-- [${socket.id}] Left room: ${data.room}`);
         });
