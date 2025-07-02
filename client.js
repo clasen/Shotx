@@ -87,7 +87,7 @@ export default class SxClient {
 
     // Internal method to join room without tracking
     async _joinRoom(room) {
-        return this.send('_room_join', { room });
+        return this.send('sx_join', { room });
     }
 
     // Connect to the server with a token
@@ -169,7 +169,7 @@ export default class SxClient {
     }
 
     async leave(room) {
-        const result = await this.send('_room_leave', { room });
+        const result = await this.send('sx_leave', { room });
         this.joinedRooms.delete(room); // Remove from tracked rooms
         log.info(`> Left room: ${room}`);
         return result;
