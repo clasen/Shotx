@@ -105,7 +105,7 @@ server.listen(3000, () => {
 #### Client with Rooms
 
 ```javascript
-import { SxClient } from 'shotx';
+import SxClient from 'shotx/client';
 
 const client = new SxClient();
 
