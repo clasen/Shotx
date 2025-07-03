@@ -6,7 +6,8 @@ const sxServer = new SxServer({ server });
 
 sxServer
     .setAuthHandler(async (token, socket) => {
-        return token == 'valid' ? {} : null;
+        // Return user data if token is valid, null otherwise
+        return token === 'valid' ? { userId: 'user123' } : null;
     })
     .onMessage('test_route', async (socket, data) => {
         return { status: 'ok', data, auth: socket.auth };
