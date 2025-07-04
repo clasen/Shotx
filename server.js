@@ -5,7 +5,7 @@ const log = new LemonLog("SxServer");
 
 export default class SxServer {
 
-    constructor({ server, opts, persistence } = {}) {
+    constructor({ server, opts, onAdd, onList } = {}) {
         if (!server) {
             throw new Error('HTTP(s) server must be provided');
         }
@@ -24,8 +24,10 @@ export default class SxServer {
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
         
-        // Configurar persistencia
-        this.setupPersistence(persistence);
+        // Callbacks de persistencia
+        this.onAdd = onAdd || this.defaultAdd;
+        this.onList = onList || this.defaultList;
+        this.storage = new Map(); // Almacenamiento por defecto
 
         // Configurar middleware de autenticación
         this.io.use(async (socket, next) => {
@@ -52,67 +54,16 @@ export default class SxServer {
         this.setupListeners();
     }
 
-    /**
-     * Configura los callbacks de persistencia
-     * @param {Object} persistence - Objeto con callbacks de persistencia
-     * @param {Function} persistence.addMessage - Callback para agregar mensaje (room, message)
-     * @param {Function} persistence.getMessages - Callback para obtener mensajes (room)
-     * @param {Function} persistence.clearMessages - Callback para limpiar mensajes (room)
-     */
-    setupPersistence(persistence) {
-        if (persistence) {
-            // Validar que los callbacks sean funciones
-            if (persistence.addMessage && typeof persistence.addMessage !== 'function') {
-                throw new Error('persistence.addMessage must be a function');
-            }
-            if (persistence.getMessages && typeof persistence.getMessages !== 'function') {
-                throw new Error('persistence.getMessages must be a function');
-            }
-            if (persistence.clearMessages && typeof persistence.clearMessages !== 'function') {
-                throw new Error('persistence.clearMessages must be a function');
-            }
-
-            this.persistence = {
-                addMessage: persistence.addMessage || this.defaultAddMessage.bind(this),
-                getMessages: persistence.getMessages || this.defaultGetMessages.bind(this),
-                clearMessages: persistence.clearMessages || this.defaultClearMessages.bind(this)
-            };
-        } else {
-            // Usar persistencia por defecto (en memoria)
-            this.persistence = {
-                addMessage: this.defaultAddMessage.bind(this),
-                getMessages: this.defaultGetMessages.bind(this),
-                clearMessages: this.defaultClearMessages.bind(this)
-            };
+    // Implementaciones por defecto
+    defaultAdd(room, message) {
+        if (!this.storage.has(room)) {
+            this.storage.set(room, []);
         }
-
-        // Almacenamiento en memoria por defecto
-        this.memoryStorage = new Map();
+        this.storage.get(room).push(message);
     }
 
-    /**
-     * Registra callbacks de persistencia después de la construcción
-     * @param {Object} persistence - Objeto con callbacks de persistencia
-     */
-    setPersistence(persistence) {
-        this.setupPersistence(persistence);
-        return this;
-    }
-
-    // Implementaciones por defecto (en memoria)
-    async defaultAddMessage(room, message) {
-        if (!this.memoryStorage.has(room)) {
-            this.memoryStorage.set(room, []);
-        }
-        this.memoryStorage.get(room).push(message);
-    }
-
-    async defaultGetMessages(room) {
-        return this.memoryStorage.get(room) || [];
-    }
-
-    async defaultClearMessages(room) {
-        this.memoryStorage.delete(room);
+    defaultList(room) {
+        return this.storage.get(room) || [];
     }
 
     setAuthHandler(handler) {
@@ -208,7 +159,7 @@ export default class SxServer {
      */
     to(room) {
         return {
-            send: async (type, data) => {
+            send: (type, data) => {
                 const message = {
                     meta: { type },
                     data
@@ -222,9 +173,9 @@ export default class SxServer {
                     log.info(`--> [room:${room}] Sending message: ${type}`, message);
                     this.io.to(room).emit('message', message);
                 } else {
-                    // Room is offline, persist the message using configured persistence
+                    // Room is offline, persist the message
                     log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
-                    await this.persistence.addMessage(room, { type, data });
+                    this.onAdd(room, { type, data });
                 }
             }
         };
@@ -234,12 +185,11 @@ export default class SxServer {
      * Process pending messages for a room when a client joins
      * @param {string} room - Room name
      */
-    async processRoomMessages(room) {
+    processRoomMessages(room) {
         try {
-            const pendingMessages = await this.persistence.getMessages(room);
+            const pendingMessages = this.onList(room);
 
-            console.log(pendingMessages);
-            if (pendingMessages && pendingMessages.length > 0) {
+            if (pendingMessages.length > 0) {
                 log.info(`--> [room:${room}] Processing ${pendingMessages.length} pending messages`);
 
                 for (const msg of pendingMessages) {
@@ -252,8 +202,8 @@ export default class SxServer {
                     log.info(`--> [room:${room}] Sent pending message: ${msg.type}`, message);
                 }
 
-                // Clear processed messages using configured persistence
-                await this.persistence.clearMessages(room);
+                // Clear processed messages
+                this.storage.delete(room);
             }
         } catch (error) {
             log.error(`Error processing room messages for ${room}:`, error);
