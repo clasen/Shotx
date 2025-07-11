@@ -102,7 +102,7 @@ server.listen(3000, () => {
 
     // Send files to specific rooms using consistent API
     setTimeout(() => {
-        sxServer.to('user-room').sendFile({
+        sxServer.to('user-room').sendFile('welcome_file', {
             name: 'welcome.txt',
             size: 25,
             type: 'text/plain',
@@ -155,9 +155,9 @@ sxServer.setAuthHandler(async (token, socket) => {
     return token === 'valid' ? { userId: 'user123' } : null;
 });
 
-// Optional: Custom file handler
-sxServer.onFile(async (socket, fileData) => {
-    console.log('File received:', fileData.name, fileData.size, 'bytes');
+// File handler with route-based processing
+sxServer.onFile('document_upload', async (socket, fileData, parsedFile) => {
+    console.log('Document received:', fileData.name, fileData.size, 'bytes');
     
     // Extract room routing info (not part of file properties)
     const { room, ...fileProps } = fileData;
@@ -166,11 +166,18 @@ sxServer.onFile(async (socket, fileData) => {
     // Work with clean file properties without routing info
     console.log('Pure file data:', fileProps);
     
+    if (parsedFile) {
+        console.log('Parsed file buffer:', parsedFile.buffer.length, 'bytes');
+        console.log('MIME type:', parsedFile.mimeType);
+        
+        // Save to disk, process, etc.
+        // fs.writeFileSync(`uploads/${fileData.name}`, parsedFile.buffer);
+    }
+    
     if (room) {
         console.log(`Client requested broadcast to room: ${room}`);
-        // You can choose to honor the room request or route differently
-        // Remove room from file data when broadcasting (it's routing info, not file property)
-        sxServer.to(room).sendFile(fileProps);
+        // Send to room using the same route
+        sxServer.to(room).sendFile('document_upload', fileProps);
     }
     
     return { 
@@ -180,8 +187,8 @@ sxServer.onFile(async (socket, fileData) => {
     };
 });
 
-// Send file to specific room
-sxServer.to('file-room').sendFile({
+// Send file to specific room using route
+sxServer.to('file-room').sendFile('document_upload', {
     name: 'document.pdf',
     size: 1024,
     type: 'application/pdf',
@@ -203,9 +210,14 @@ const client = new SxClient();
 await client.connect('valid');
 await client.join('file-room');
 
-// Set up file handler
-client.onFile(async (socket, fileData) => {
-    console.log('File received:', fileData.name);
+// Set up file handler for specific route
+client.onFile('document_upload', async (socket, fileData, parsedFile) => {
+    console.log('Document received:', fileData.name);
+    
+    if (parsedFile) {
+        console.log('Parsed file:', parsedFile.buffer.length, 'bytes');
+        console.log('MIME type:', parsedFile.mimeType);
+    }
     
     // Create a download link (browser)
     const a = document.createElement('a');
@@ -219,7 +231,7 @@ document.getElementById('fileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (file) {
         try {
-            const response = await client.sendFile(file, 'file-room');
+            const response = await client.sendFile('document_upload', file, 'file-room');
             console.log('File sent:', response);
         } catch (error) {
             console.error('Error sending file:', error);
@@ -250,7 +262,7 @@ new SxServer({ server, opts })
   Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(socket, data)` parameters.
 
 - **to(room: string): Object**  
-  Returns an object with `send` and `sendFile` methods to send messages or files to a specific room. Messages and files are persisted if the room is offline and delivered when clients join.
+  Returns an object with `send` and `sendFile` methods to send messages or files to a specific room. Messages and files are persisted if the room is offline and delivered when clients join. Use `to(room).sendFile(route, fileData)` for consistent file routing.
 
 - **setupListeners()**  
   Automatically configures event listeners for client connection, message reception, disconnection, and error handling. Called automatically in constructor.
@@ -258,16 +270,16 @@ new SxServer({ server, opts })
 - **handleMessage(socket, message, callback)**  
   Internally processes incoming messages and routes them to the appropriate registered handler.
 
-- **onFile(handler: Function): SxServer**  
-  Register a handler for incoming files. The function receives the socket and file data (containing name, size, type, dataUrl, and optional room for routing). The room field is routing information, not a file property.
-
-- **sendFileToRoom(room: string, fileData: Object): void**  
-  Send a file to a specific room. The file data should contain the file information and base64 data URL. Alternatively, use `to(room).sendFile(fileData)` for consistency with the message API.
+- **onFile(route: string, handler: Function): SxServer**  
+  Register a handler for incoming files with automatic data URL parsing. The function receives the socket, file data, and parsed file buffer. The room field in file data is routing information, not a file property.
 
 **Built-in Message Types**
 - `sx_join`: Handles room joining (automatically registered)
 - `sx_leave`: Handles room leaving (automatically registered)
-- `sx_file`: Handles file transfers (automatically registered with default handler)
+
+**File Routes**
+- Use custom route names with `onFile(route, handler)` and `sendFile(route, file, room)`
+- Automatic data URL parsing provides buffer and metadata to handlers
 
 ### SxClient
 
@@ -303,11 +315,11 @@ new SxClient({ url })
 - **onMessage(route: string, handler: Function): void**  
   Register a handler for incoming messages of a specific type. The handler receives `(socket, data)` parameters.
 
-- **sendFile(file: File|Blob, room?: string): Promise<any>**  
-  Send a file to the server and optionally to a specific room. The file is converted to base64 data URL format.
+- **sendFile(route: string, file: File|Blob, room?: string): Promise<any>**  
+  Send a file to a specific route on the server and optionally to a specific room. The file is converted to base64 data URL format.
 
-- **onFile(handler: Function): void**  
-  Register a handler for incoming files. The handler receives `(socket, fileData)` parameters where fileData contains file information and base64 data URL.
+- **onFile(route: string, handler: Function): void**  
+  Register a handler for incoming files from a specific route with automatic data URL parsing. The handler receives `(socket, fileData, parsedFile)` parameters where parsedFile contains the parsed buffer and metadata.
 
 **Auto-reconnection Features**
 - Automatic reconnection with exponential backoff
@@ -336,12 +348,12 @@ All messages use a standardized format:
 
 ### File Data Format
 
-Files are sent using the `sx_file` message type with the following data structure:
+Files are sent using custom route names with the following data structure:
 
 ```javascript
 {
     meta: {
-        type: 'sx_file',
+        type: 'document_upload',  // Custom route name
         id: 'uuid-v7-generated-id'
     },
     data: {
@@ -372,17 +384,26 @@ When a client sends a file with `client.sendFile(file, 'room-name')`, the server
 
 **Best Practice in Custom Handlers:**
 ```javascript
-sxServer.onFile(async (socket, fileData) => {
+sxServer.onFile('document_upload', async (socket, fileData, parsedFile) => {
     // Separate file properties from routing instructions
     const { room, ...fileProperties } = fileData;
     
     // Process the file using only its properties
     console.log('File:', fileProperties.name);
     
+    // Use parsed file buffer for processing
+    if (parsedFile) {
+        console.log('Buffer size:', parsedFile.buffer.length);
+        console.log('MIME type:', parsedFile.mimeType);
+        
+        // Save to disk, process, etc.
+        // fs.writeFileSync(`uploads/${fileData.name}`, parsedFile.buffer);
+    }
+    
     // Handle routing based on your business logic
     if (room) {
         // Send only file properties when broadcasting
-        sxServer.to(room).sendFile(fileProperties);
+        sxServer.to(room).sendFile('document_upload', fileProperties);
     }
     
     return { status: 'processed', filename: fileProperties.name };
@@ -411,16 +432,20 @@ See `demo/sx-server-room.js` and `demo/sx-client-room.js` for room-based example
 
 ### File Sharing
 
-See `demo/sx-file-demo.js` for file sharing examples with base64 data URLs.
-See `demo/sx-file-clean-demo.js` for clean separation of file properties vs routing info.
+See `demo/sx-file-routes-demo.js` for route-based file handling examples with automatic data URL parsing.
 
 **Server sending files to rooms:**
 ```javascript
-// Consistent API - recommended
-sxServer.to('my-room').sendFile(fileData);
+// Consistent API with route-based file handling
+sxServer.to('my-room').sendFile('document_upload', fileData);
 
-// Alternative method - backward compatibility
-sxServer.sendFileToRoom('my-room', fileData);
+// Register file handler for specific route
+sxServer.onFile('document_upload', async (socket, fileData, parsedFile) => {
+    // Process file with automatic data URL parsing
+    console.log('File received:', fileData.name);
+    console.log('Buffer size:', parsedFile.buffer.length);
+    return { status: 'processed' };
+});
 ```
 
 ## Dependencies

@@ -127,21 +127,7 @@ export default class SxServer {
         }
     }
 
-    /**
-     * Send a file to a specific room
-     * @param {string} room - Room name
-     * @param {string} route - File route name
-     * @param {Object} fileData - File data object
-     */
-    sendFileToRoom(room, route, fileData) {
-        // If only two parameters provided, assume second is fileData with default route
-        if (arguments.length === 2) {
-            fileData = route;
-            route = 'sx_file';
-        }
-        
-        this.to(room).sendFile(route, fileData);
-    }
+
 
 
 
