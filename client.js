@@ -11,6 +11,8 @@ export default class SxClient {
         this.isConnected = false;
         this.offlineQueue = [];
         this.joinedRooms = new Set(); // Track joined rooms for reconnection
+        this.messageHandlers = new Map(); // Store route handlers
+        this.routeListenerAttached = false; // Track if main route listener is attached
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -120,6 +122,8 @@ export default class SxClient {
                     log.info('> connect');
                     this.isConnected = true;
                     retryCount = 0; // Reset retry count on successful connection
+                    this.routeListenerAttached = false; // Reset route listener flag
+                    this._setupRouteListener(); // Re-setup route listener
                 });
 
                 this.socket.on('connect_error', (error) => {
@@ -133,6 +137,7 @@ export default class SxClient {
                 this.socket.on('disconnect', () => {
                     log.info('> disconnect');
                     this.isConnected = false;
+                    this.routeListenerAttached = false; // Reset route listener flag
                 });
 
                 this.socket.on('auth_success', async (data) => {
@@ -151,6 +156,7 @@ export default class SxClient {
         if (this.socket) {
             log.info('> Disconnecting');
             this.isConnected = false;
+            this.routeListenerAttached = false; // Reset route listener flag
             this.socket.disconnect();
             this.socket = null;
         }
@@ -175,14 +181,21 @@ export default class SxClient {
         return result;
     }
 
-    onMessage(route, handler) {
-        if (!this.socket) {
-            log.warn('> Cannot set message handler - not connected');
+    // Setup the main route listener once
+    _setupRouteListener() {
+        if (this.routeListenerAttached || !this.socket) {
             return;
         }
 
         this.socket.on(this.routeEvent, async (message) => {
-            if (message.meta && message.meta.type === route) {
+            if (!message.meta || !message.meta.type) {
+                return;
+            }
+
+            const route = message.meta.type;
+            const handler = this.messageHandlers.get(route);
+            
+            if (handler) {
                 try {
                     await handler(this.socket, message.data);
                 } catch (error) {
@@ -190,5 +203,25 @@ export default class SxClient {
                 }
             }
         });
+
+        this.routeListenerAttached = true;
+    }
+
+    onMessage(route, handler) {
+        if (!this.socket) {
+            log.warn('> Cannot set message handler - not connected');
+            return;
+        }
+
+        // Store the handler for this route
+        this.messageHandlers.set(route, handler);
+        
+        // Setup the main route listener if not already done
+        this._setupRouteListener();
+    }
+
+    // Remove a message handler for a specific route
+    offMessage(route) {
+        this.messageHandlers.delete(route);
     }
 } 
