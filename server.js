@@ -71,6 +71,48 @@ export default class SxServer {
         return this;
     }
 
+    // ============ File handling methods ============
+    /**
+     * Register handler for incoming files
+     * @param {Function} handler - Handler function that receives (socket, fileData)
+     */
+    onFile(handler) {
+        this.onMessage('sx_file', handler);
+        return this;
+    }
+
+    /**
+     * Send a file to a specific room
+     * @param {string} room - Room name
+     * @param {Object} fileData - File data object
+     */
+    sendFileToRoom(room, fileData) {
+        this.to(room).send('sx_file', fileData);
+    }
+
+    /**
+     * Default file handler - broadcasts file to specified room or logs receipt
+     * @param {Object} socket - Socket instance
+     * @param {Object} fileData - File data received
+     */
+    async defaultFileHandler(socket, fileData) {
+        const { name, size, type, room } = fileData;
+        
+        log.info(`<-- [${socket.id}] File received: ${name} (${size} bytes, ${type})`);
+        
+        if (room) {
+            // If room is specified, broadcast to that room
+            log.info(`<-- [${socket.id}] Broadcasting file to room: ${room}`);
+            this.sendFileToRoom(room, fileData);
+        }
+        
+        return { 
+            status: 'received', 
+            file: { name, size, type, room },
+            timestamp: Date.now()
+        };
+    }
+
     setupListeners() {
         this.io.on('connection', (socket) => {
             log.info(`<-- [${socket.id}] Client connected`);
@@ -106,6 +148,9 @@ export default class SxServer {
             socket.leave(data.room);
             log.info(`<-- [${socket.id}] Left room: ${data.room}`);
         });
+
+        // Default file handler
+        this.onMessage('sx_file', this.defaultFileHandler.bind(this));
     }
 
     async handleMessage(socket, message, callback) {

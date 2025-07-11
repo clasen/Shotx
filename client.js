@@ -16,6 +16,69 @@ export default class SxClient {
         this.routeEvent = 'message';
     }
 
+    // ============ File handling methods ============
+    /**
+     * Send a file to server or room
+     * @param {File|Blob} file - File to send
+     * @param {string} room - Optional room to send file to
+     * @returns {Promise} - Promise that resolves when file is sent
+     */
+    async sendFile(file, room = null) {
+        if (!file) {
+            throw new Error('File is required');
+        }
+
+        // Convert file to base64 data URL
+        const dataUrl = await this._fileToDataUrl(file);
+        
+        const fileData = {
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            lastModified: file.lastModified,
+            dataUrl: dataUrl,
+            room: room
+        };
+
+        return this.send('sx_file', fileData);
+    }
+
+    /**
+     * Register handler for incoming files
+     * @param {Function} handler - Handler function that receives (socket, fileData)
+     */
+    onFile(handler) {
+        this.onMessage('sx_file', handler);
+    }
+
+    /**
+     * Convert file to data URL
+     * @param {File|Blob} file - File to convert
+     * @returns {Promise<string>} - Promise that resolves to data URL
+     */
+    _fileToDataUrl(file) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                // Check if we're in a browser environment
+                if (typeof FileReader !== 'undefined') {
+                    // Browser environment
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                } else {
+                    // Node.js environment
+                    const buffer = await file.arrayBuffer();
+                    const base64 = Buffer.from(buffer).toString('base64');
+                    const dataUrl = `data:${file.type || 'application/octet-stream'};base64,${base64}`;
+                    resolve(dataUrl);
+                }
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
     // ============ Main send method ============
     async emit(eventName, data, meta = {}) {
         // Add UUID to meta

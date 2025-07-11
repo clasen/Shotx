@@ -127,6 +127,81 @@ try {
 }
 ```
 
+### File Sharing
+
+Shotx supports efficient file sharing through base64 data URLs, using the same message channel as regular communications.
+
+#### Server File Handling
+
+```javascript
+import { createServer } from 'http';
+import SxServer from 'shotx/server';
+
+const server = createServer();
+const sxServer = new SxServer({ server });
+
+// Set authentication handler
+sxServer.setAuthHandler(async (token, socket) => {
+    return token === 'valid' ? { userId: 'user123' } : null;
+});
+
+// Optional: Custom file handler
+sxServer.onFile(async (socket, fileData) => {
+    console.log('File received:', fileData.name, fileData.size, 'bytes');
+    
+    // Custom processing - save to disk, process, etc.
+    if (fileData.room) {
+        console.log(`Broadcasting file to room: ${fileData.room}`);
+        // File is automatically broadcasted to room by default handler
+    }
+    
+    return { 
+        status: 'processed', 
+        message: 'File received successfully',
+        filename: fileData.name 
+    };
+});
+
+server.listen(3000, () => {
+    console.log('Server running at http://localhost:3000');
+});
+```
+
+#### Client File Handling
+
+```javascript
+import SxClient from 'shotx/client';
+
+const client = new SxClient();
+
+await client.connect('valid');
+await client.join('file-room');
+
+// Set up file handler
+client.onFile(async (socket, fileData) => {
+    console.log('File received:', fileData.name);
+    
+    // Create a download link (browser)
+    const a = document.createElement('a');
+    a.href = fileData.dataUrl;
+    a.download = fileData.name;
+    a.click();
+});
+
+// Handle file input (browser)
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        try {
+            const response = await client.sendFile(file, 'file-room');
+            console.log('File sent:', response);
+        } catch (error) {
+            console.error('Error sending file:', error);
+        }
+    }
+});
+```
+
 ## API Documentation
 
 ### SxServer
@@ -157,9 +232,16 @@ new SxServer({ server, opts })
 - **handleMessage(socket, message, callback)**  
   Internally processes incoming messages and routes them to the appropriate registered handler.
 
+- **onFile(handler: Function): SxServer**  
+  Register a handler for incoming files. The function receives the socket and file data (containing name, size, type, dataUrl, and optional room).
+
+- **sendFileToRoom(room: string, fileData: Object): void**  
+  Send a file to a specific room. The file data should contain the file information and base64 data URL.
+
 **Built-in Message Types**
 - `sx_join`: Handles room joining (automatically registered)
 - `sx_leave`: Handles room leaving (automatically registered)
+- `sx_file`: Handles file transfers (automatically registered with default handler)
 
 ### SxClient
 
@@ -195,6 +277,12 @@ new SxClient({ url })
 - **onMessage(route: string, handler: Function): void**  
   Register a handler for incoming messages of a specific type. The handler receives `(socket, data)` parameters.
 
+- **sendFile(file: File|Blob, room?: string): Promise<any>**  
+  Send a file to the server and optionally to a specific room. The file is converted to base64 data URL format.
+
+- **onFile(handler: Function): void**  
+  Register a handler for incoming files. The handler receives `(socket, fileData)` parameters where fileData contains file information and base64 data URL.
+
 **Auto-reconnection Features**
 - Automatic reconnection with exponential backoff
 - Automatic rejoining of previously joined rooms
@@ -220,6 +308,27 @@ All messages use a standardized format:
 }
 ```
 
+### File Data Format
+
+Files are sent using the `sx_file` message type with the following data structure:
+
+```javascript
+{
+    meta: {
+        type: 'sx_file',
+        id: 'uuid-v7-generated-id'
+    },
+    data: {
+        name: 'filename.txt',
+        size: 1024,
+        type: 'text/plain',
+        lastModified: 1640995200000,
+        dataUrl: 'data:text/plain;base64,SGVsbG8gV29ybGQ=',
+        room: 'optional-room-name'
+    }
+}
+```
+
 ## Error Codes
 
 - `2001`: Invalid message format
@@ -239,6 +348,10 @@ See `demo/sx-server.js` and `demo/sx-client.js` for basic examples.
 ### Room-based Communication
 
 See `demo/sx-server-room.js` and `demo/sx-client-room.js` for room-based examples.
+
+### File Sharing
+
+See `demo/sx-file-demo.js` for file sharing examples with base64 data URLs.
 
 ## Dependencies
 
