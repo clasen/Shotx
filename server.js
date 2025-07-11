@@ -103,12 +103,16 @@ export default class SxServer {
         if (room) {
             // If room is specified, broadcast to that room
             log.info(`<-- [${socket.id}] Broadcasting file to room: ${room}`);
-            this.to(room).sendFile(fileData);
+            
+            // Remove room from file data when broadcasting (it's routing info, not file property)
+            const { room: _, ...cleanFileData } = fileData;
+            this.to(room).sendFile(cleanFileData);
         }
         
         return { 
             status: 'received', 
-            file: { name, size, type, room },
+            file: { name, size, type },
+            room: room || null,
             timestamp: Date.now()
         };
     }

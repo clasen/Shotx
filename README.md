@@ -159,16 +159,24 @@ sxServer.setAuthHandler(async (token, socket) => {
 sxServer.onFile(async (socket, fileData) => {
     console.log('File received:', fileData.name, fileData.size, 'bytes');
     
+    // Extract room routing info (not part of file properties)
+    const { room, ...fileProps } = fileData;
+    
     // Custom processing - save to disk, process, etc.
-    if (fileData.room) {
-        console.log(`Broadcasting file to room: ${fileData.room}`);
-        // File is automatically broadcasted to room by default handler
+    // Work with clean file properties without routing info
+    console.log('Pure file data:', fileProps);
+    
+    if (room) {
+        console.log(`Client requested broadcast to room: ${room}`);
+        // You can choose to honor the room request or route differently
+        // Remove room from file data when broadcasting (it's routing info, not file property)
+        sxServer.to(room).sendFile(fileProps);
     }
     
     return { 
         status: 'processed', 
         message: 'File received successfully',
-        filename: fileData.name 
+        filename: fileProps.name 
     };
 });
 
@@ -251,7 +259,7 @@ new SxServer({ server, opts })
   Internally processes incoming messages and routes them to the appropriate registered handler.
 
 - **onFile(handler: Function): SxServer**  
-  Register a handler for incoming files. The function receives the socket and file data (containing name, size, type, dataUrl, and optional room).
+  Register a handler for incoming files. The function receives the socket and file data (containing name, size, type, dataUrl, and optional room for routing). The room field is routing information, not a file property.
 
 - **sendFileToRoom(room: string, fileData: Object): void**  
   Send a file to a specific room. The file data should contain the file information and base64 data URL. Alternatively, use `to(room).sendFile(fileData)` for consistency with the message API.
@@ -337,14 +345,48 @@ Files are sent using the `sx_file` message type with the following data structur
         id: 'uuid-v7-generated-id'
     },
     data: {
+        // File properties
         name: 'filename.txt',
         size: 1024,
         type: 'text/plain',
         lastModified: 1640995200000,
         dataUrl: 'data:text/plain;base64,SGVsbG8gV29ybGQ=',
+        
+        // Routing information (not a file property)
         room: 'optional-room-name'
     }
 }
+```
+
+**Note:** The `room` field is routing information sent by the client to indicate where the file should be broadcasted. It's not an intrinsic property of the file itself. When processing files in custom handlers, consider separating routing info from file properties.
+
+### Understanding File Properties vs Routing Information
+
+When a client sends a file with `client.sendFile(file, 'room-name')`, the server receives:
+
+**File Properties (intrinsic to the file):**
+- `name`, `size`, `type`, `lastModified`, `dataUrl`
+
+**Routing Information (instruction from client):**
+- `room` - where the client wants the file to be sent
+
+**Best Practice in Custom Handlers:**
+```javascript
+sxServer.onFile(async (socket, fileData) => {
+    // Separate file properties from routing instructions
+    const { room, ...fileProperties } = fileData;
+    
+    // Process the file using only its properties
+    console.log('File:', fileProperties.name);
+    
+    // Handle routing based on your business logic
+    if (room) {
+        // Send only file properties when broadcasting
+        sxServer.to(room).sendFile(fileProperties);
+    }
+    
+    return { status: 'processed', filename: fileProperties.name };
+});
 ```
 
 ## Error Codes
@@ -370,6 +412,7 @@ See `demo/sx-server-room.js` and `demo/sx-client-room.js` for room-based example
 ### File Sharing
 
 See `demo/sx-file-demo.js` for file sharing examples with base64 data URLs.
+See `demo/sx-file-clean-demo.js` for clean separation of file properties vs routing info.
 
 **Server sending files to rooms:**
 ```javascript
