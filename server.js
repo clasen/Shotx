@@ -73,49 +73,77 @@ export default class SxServer {
 
     // ============ File handling methods ============
     /**
-     * Register handler for incoming files
-     * @param {Function} handler - Handler function that receives (socket, fileData)
+     * Register handler for incoming files with automatic data URL parsing
+     * @param {string} route - File route name
+     * @param {Function} handler - Handler function that receives (socket, fileData, parsedFile)
      */
-    onFile(handler) {
-        this.onMessage('sx_file', handler);
+    onFile(route, handler) {
+        this.onMessage(route, async (socket, data) => {
+            // Parse data URL if present
+            let parsedFile = null;
+            if (data.dataUrl) {
+                parsedFile = this._parseDataUrl(data.dataUrl);
+            }
+            
+            // Call the handler with both original data and parsed file
+            return await handler(socket, data, parsedFile);
+        });
         return this;
+    }
+
+    /**
+     * Parse data URL to extract content and metadata
+     * @param {string} dataUrl - Data URL string
+     * @returns {Object} - Parsed file object with buffer, mimeType, and isBase64
+     */
+    _parseDataUrl(dataUrl) {
+        if (!dataUrl || !dataUrl.startsWith('data:')) {
+            return null;
+        }
+        
+        try {
+            // Parse data URL format: data:[<mediatype>][;base64],<data>
+            const [header, data] = dataUrl.split(',');
+            const [mimeType, encoding] = header.replace('data:', '').split(';');
+            
+            const isBase64 = encoding === 'base64';
+            let buffer;
+            
+            if (isBase64) {
+                buffer = Buffer.from(data, 'base64');
+            } else {
+                buffer = Buffer.from(decodeURIComponent(data), 'utf8');
+            }
+            
+            return {
+                buffer,
+                mimeType: mimeType || 'application/octet-stream',
+                isBase64,
+                size: buffer.length
+            };
+        } catch (error) {
+            console.error('Error parsing data URL:', error);
+            return null;
+        }
     }
 
     /**
      * Send a file to a specific room
      * @param {string} room - Room name
+     * @param {string} route - File route name
      * @param {Object} fileData - File data object
      */
-    sendFileToRoom(room, fileData) {
-        this.to(room).sendFile(fileData);
-    }
-
-    /**
-     * Default file handler - broadcasts file to specified room or logs receipt
-     * @param {Object} socket - Socket instance
-     * @param {Object} fileData - File data received
-     */
-    async defaultFileHandler(socket, fileData) {
-        const { name, size, type, room } = fileData;
-        
-        log.info(`<-- [${socket.id}] File received: ${name} (${size} bytes, ${type})`);
-        
-        if (room) {
-            // If room is specified, broadcast to that room
-            log.info(`<-- [${socket.id}] Broadcasting file to room: ${room}`);
-            
-            // Remove room from file data when broadcasting (it's routing info, not file property)
-            const { room: _, ...cleanFileData } = fileData;
-            this.to(room).sendFile(cleanFileData);
+    sendFileToRoom(room, route, fileData) {
+        // If only two parameters provided, assume second is fileData with default route
+        if (arguments.length === 2) {
+            fileData = route;
+            route = 'sx_file';
         }
         
-        return { 
-            status: 'received', 
-            file: { name, size, type },
-            room: room || null,
-            timestamp: Date.now()
-        };
+        this.to(room).sendFile(route, fileData);
     }
+
+
 
     setupListeners() {
         this.io.on('connection', (socket) => {
@@ -152,9 +180,6 @@ export default class SxServer {
             socket.leave(data.room);
             log.info(`<-- [${socket.id}] Left room: ${data.room}`);
         });
-
-        // Default file handler
-        this.onMessage('sx_file', this.defaultFileHandler.bind(this));
     }
 
     async handleMessage(socket, message, callback) {
@@ -212,9 +237,15 @@ export default class SxServer {
                     this.db.add(room, { type, data });
                 }
             },
-            sendFile: (fileData) => {
+            sendFile: (route, fileData) => {
+                // If only one parameter provided, assume it's fileData with default route
+                if (arguments.length === 1) {
+                    fileData = route;
+                    route = 'sx_file';
+                }
+                
                 const message = {
-                    meta: { type: 'sx_file' },
+                    meta: { type: route },
                     data: fileData
                 };
 
@@ -223,12 +254,12 @@ export default class SxServer {
 
                 if (roomSockets && roomSockets.size > 0) {
                     // Room has connected clients, send file immediately
-                    log.info(`--> [room:${room}] Sending file: ${fileData.name}`, message);
+                    log.info(`--> [room:${room}] Sending file: ${fileData.name} (route: ${route})`, message);
                     this.io.to(room).emit('message', message);
                 } else {
                     // Room is offline, persist the file
-                    log.info(`--> [room:${room}] Room offline, persisting file: ${fileData.name}`, message);
-                    this.db.add(room, { type: 'sx_file', data: fileData });
+                    log.info(`--> [room:${room}] Room offline, persisting file: ${fileData.name} (route: ${route})`, message);
+                    this.db.add(room, { type: route, data: fileData });
                 }
             }
         };

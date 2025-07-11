@@ -18,12 +18,16 @@ export default class SxClient {
 
     // ============ File handling methods ============
     /**
-     * Send a file to server or room
+     * Send a file to a specific route
+     * @param {string} route - File route name
      * @param {File|Blob} file - File to send
      * @param {string} room - Optional room to send file to
      * @returns {Promise} - Promise that resolves when file is sent
      */
-    async sendFile(file, room = null) {
+    async sendFile(route, file, room = null) {
+        if (!route) {
+            throw new Error('Route is required');
+        }
         if (!file) {
             throw new Error('File is required');
         }
@@ -40,15 +44,75 @@ export default class SxClient {
             room: room
         };
 
-        return this.send('sx_file', fileData);
+        return this.send(route, fileData);
     }
 
     /**
-     * Register handler for incoming files
-     * @param {Function} handler - Handler function that receives (socket, fileData)
+     * Register handler for incoming files with automatic data URL parsing
+     * @param {string} route - File route name
+     * @param {Function} handler - Handler function that receives (socket, fileData, parsedFile)
      */
-    onFile(handler) {
-        this.onMessage('sx_file', handler);
+    onFile(route, handler) {
+        this.onMessage(route, async (socket, data) => {
+            // Parse data URL if present
+            let parsedFile = null;
+            if (data.dataUrl) {
+                parsedFile = this._parseDataUrl(data.dataUrl);
+            }
+            
+            // Call the handler with both original data and parsed file
+            return await handler(socket, data, parsedFile);
+        });
+    }
+
+    /**
+     * Parse data URL to extract content and metadata
+     * @param {string} dataUrl - Data URL string
+     * @returns {Object} - Parsed file object with buffer, mimeType, and isBase64
+     */
+    _parseDataUrl(dataUrl) {
+        if (!dataUrl || !dataUrl.startsWith('data:')) {
+            return null;
+        }
+        
+        try {
+            // Parse data URL format: data:[<mediatype>][;base64],<data>
+            const [header, data] = dataUrl.split(',');
+            const [mimeType, encoding] = header.replace('data:', '').split(';');
+            
+            const isBase64 = encoding === 'base64';
+            let buffer;
+            
+            if (isBase64) {
+                // In browser environment, use Uint8Array instead of Buffer
+                if (typeof Buffer !== 'undefined') {
+                    buffer = Buffer.from(data, 'base64');
+                } else {
+                    const binaryString = atob(data);
+                    buffer = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        buffer[i] = binaryString.charCodeAt(i);
+                    }
+                }
+            } else {
+                const textData = decodeURIComponent(data);
+                if (typeof Buffer !== 'undefined') {
+                    buffer = Buffer.from(textData, 'utf8');
+                } else {
+                    buffer = new TextEncoder().encode(textData);
+                }
+            }
+            
+            return {
+                buffer,
+                mimeType: mimeType || 'application/octet-stream',
+                isBase64,
+                size: buffer.length
+            };
+        } catch (error) {
+            console.error('Error parsing data URL:', error);
+            return null;
+        }
     }
 
     /**
