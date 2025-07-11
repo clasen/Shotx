@@ -87,7 +87,7 @@ export default class SxServer {
      * @param {Object} fileData - File data object
      */
     sendFileToRoom(room, fileData) {
-        this.to(room).send('sx_file', fileData);
+        this.to(room).sendFile(fileData);
     }
 
     /**
@@ -103,7 +103,7 @@ export default class SxServer {
         if (room) {
             // If room is specified, broadcast to that room
             log.info(`<-- [${socket.id}] Broadcasting file to room: ${room}`);
-            this.sendFileToRoom(room, fileData);
+            this.to(room).sendFile(fileData);
         }
         
         return { 
@@ -185,7 +185,7 @@ export default class SxServer {
     /**
      * Send message to a specific room
      * @param {string} room - Room name
-     * @returns {Object} - Object with send method
+     * @returns {Object} - Object with send and sendFile methods
      */
     to(room) {
         return {
@@ -206,6 +206,25 @@ export default class SxServer {
                     // Room is offline, persist the message
                     log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
                     this.db.add(room, { type, data });
+                }
+            },
+            sendFile: (fileData) => {
+                const message = {
+                    meta: { type: 'sx_file' },
+                    data: fileData
+                };
+
+                // Check if room has connected clients
+                const roomSockets = this.io.sockets.adapter.rooms.get(room);
+
+                if (roomSockets && roomSockets.size > 0) {
+                    // Room has connected clients, send file immediately
+                    log.info(`--> [room:${room}] Sending file: ${fileData.name}`, message);
+                    this.io.to(room).emit('message', message);
+                } else {
+                    // Room is offline, persist the file
+                    log.info(`--> [room:${room}] Room offline, persisting file: ${fileData.name}`, message);
+                    this.db.add(room, { type: 'sx_file', data: fileData });
                 }
             }
         };

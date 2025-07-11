@@ -99,6 +99,16 @@ server.listen(3000, () => {
             timestamp: Date.now() 
         });
     }, 5000);
+
+    // Send files to specific rooms using consistent API
+    setTimeout(() => {
+        sxServer.to('user-room').sendFile({
+            name: 'welcome.txt',
+            size: 25,
+            type: 'text/plain',
+            dataUrl: 'data:text/plain;base64,V2VsY29tZSB0byBTaG90eCE='
+        });
+    }, 2000);
 });
 ```
 
@@ -160,6 +170,14 @@ sxServer.onFile(async (socket, fileData) => {
         message: 'File received successfully',
         filename: fileData.name 
     };
+});
+
+// Send file to specific room
+sxServer.to('file-room').sendFile({
+    name: 'document.pdf',
+    size: 1024,
+    type: 'application/pdf',
+    dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK...'
 });
 
 server.listen(3000, () => {
@@ -224,7 +242,7 @@ new SxServer({ server, opts })
   Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(socket, data)` parameters.
 
 - **to(room: string): Object**  
-  Returns an object with a `send` method to send messages to a specific room. Messages are persisted if the room is offline and delivered when clients join.
+  Returns an object with `send` and `sendFile` methods to send messages or files to a specific room. Messages and files are persisted if the room is offline and delivered when clients join.
 
 - **setupListeners()**  
   Automatically configures event listeners for client connection, message reception, disconnection, and error handling. Called automatically in constructor.
@@ -236,7 +254,7 @@ new SxServer({ server, opts })
   Register a handler for incoming files. The function receives the socket and file data (containing name, size, type, dataUrl, and optional room).
 
 - **sendFileToRoom(room: string, fileData: Object): void**  
-  Send a file to a specific room. The file data should contain the file information and base64 data URL.
+  Send a file to a specific room. The file data should contain the file information and base64 data URL. Alternatively, use `to(room).sendFile(fileData)` for consistency with the message API.
 
 **Built-in Message Types**
 - `sx_join`: Handles room joining (automatically registered)
@@ -352,6 +370,15 @@ See `demo/sx-server-room.js` and `demo/sx-client-room.js` for room-based example
 ### File Sharing
 
 See `demo/sx-file-demo.js` for file sharing examples with base64 data URLs.
+
+**Server sending files to rooms:**
+```javascript
+// Consistent API - recommended
+sxServer.to('my-room').sendFile(fileData);
+
+// Alternative method - backward compatibility
+sxServer.sendFileToRoom('my-room', fileData);
+```
 
 ## Dependencies
 
