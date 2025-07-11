@@ -11,6 +11,7 @@ export default class SxClient {
         this.isConnected = false;
         this.offlineQueue = [];
         this.joinedRooms = new Set(); // Track joined rooms for reconnection
+        this.fileHandlers = new Map();
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -141,6 +142,22 @@ export default class SxClient {
                     await this.rejoinRooms();
                     resolve(data);
                 });
+
+                // Setup message listener for files
+                this.socket.on(this.routeEvent, async (message) => {
+                    if (message.meta && message.meta.isFile) {
+                        const handler = this.fileHandlers.get(message.meta.type);
+                        if (handler) {
+                            try {
+                                // Convert base64 back to buffer
+                                const fileBuffer = Buffer.from(message.data.fileData, 'base64');
+                                await handler(fileBuffer, message.data.extraData, this.socket);
+                            } catch (error) {
+                                log.error(`> Error in file handler for route ${message.meta.type}:`, error);
+                            }
+                        }
+                    }
+                });
             };
 
             attemptConnection();
@@ -158,6 +175,25 @@ export default class SxClient {
 
     async send(type, data) {
         const meta = { type };
+        return this.emit(this.routeEvent, data, meta);
+    }
+
+    async sendFile(route, fileBuffer, extraData = {}) {
+        if (!Buffer.isBuffer(fileBuffer)) {
+            throw new Error('File must be a Buffer');
+        }
+
+        const meta = { 
+            type: route,
+            isFile: true 
+        };
+        
+        const data = {
+            fileData: fileBuffer.toString('base64'),
+            extraData
+        };
+
+        log.info(`> Sending file: ${route} (${fileBuffer.length} bytes)`);
         return this.emit(this.routeEvent, data, meta);
     }
 
@@ -182,7 +218,7 @@ export default class SxClient {
         }
 
         this.socket.on(this.routeEvent, async (message) => {
-            if (message.meta && message.meta.type === route) {
+            if (message.meta && message.meta.type === route && !message.meta.isFile) {
                 try {
                     await handler(this.socket, message.data);
                 } catch (error) {
@@ -190,5 +226,13 @@ export default class SxClient {
                 }
             }
         });
+    }
+
+    onFile(route, handler) {
+        if (typeof route !== 'string' || typeof handler !== 'function') {
+            throw new Error('Invalid parameters for onFile');
+        }
+        this.fileHandlers.set(route, handler);
+        log.info(`> Registered file handler for route: ${route}`);
     }
 } 

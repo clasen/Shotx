@@ -23,6 +23,7 @@ export default class SxServer {
         this.io = new Server(server, opts);
 
         this.messageHandlers = new Map();
+        this.fileHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
         this.db = new DeepBase({ name: 'shotx' });
 
@@ -68,6 +69,14 @@ export default class SxServer {
             throw new Error('Invalid parameters for onMessage');
         }
         this.messageHandlers.set(type, handler);
+        return this;
+    }
+
+    onFile(route, handler) {
+        if (typeof route !== 'string' || typeof handler !== 'function') {
+            throw new Error('Invalid parameters for onFile');
+        }
+        this.fileHandlers.set(route, handler);
         return this;
     }
 
@@ -124,6 +133,26 @@ export default class SxServer {
 
             log.info(`<-- [${socket.id}] - ${meta.type}`, message);
 
+            // Check if it's a file message
+            if (meta.isFile) {
+                const handler = this.fileHandlers.get(meta.type);
+                if (!handler) {
+                    return callback({ meta: { success: false, code: 2003, error: `Unknown file route: ${meta.type}` }, data: null });
+                }
+
+                try {
+                    // Convert base64 back to buffer
+                    const fileBuffer = Buffer.from(data.fileData, 'base64');
+                    const result = await handler(fileBuffer, data.extraData, socket);
+                    callback({ meta: { success: true }, data: result });
+                } catch (error) {
+                    log.error(`<-- [${socket.id}] Error processing file:`, error);
+                    callback({ meta: { success: false, code: 2004, error: error.message || 'Error processing file' }, data: null });
+                }
+                return;
+            }
+
+            // Handle regular message
             const handler = this.messageHandlers.get(meta.type);
             if (!handler) {
                 return callback({ meta: { success: false, code: 2003, error: `Unknown message type: ${meta.type}` }, data: null });
@@ -162,6 +191,43 @@ export default class SxServer {
                     log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
                     this.db.add(room, { type, data });
                 }
+            },
+            
+            sendFile: (route, fileBuffer, extraData = {}) => {
+                if (!Buffer.isBuffer(fileBuffer)) {
+                    throw new Error('File must be a Buffer');
+                }
+
+                const message = {
+                    meta: { 
+                        type: route,
+                        isFile: true 
+                    },
+                    data: {
+                        fileData: fileBuffer.toString('base64'),
+                        extraData
+                    }
+                };
+
+                // Check if room has connected clients
+                const roomSockets = this.io.sockets.adapter.rooms.get(room);
+
+                if (roomSockets && roomSockets.size > 0) {
+                    // Room has connected clients, send file immediately
+                    log.info(`--> [room:${room}] Sending file: ${route} (${fileBuffer.length} bytes)`);
+                    this.io.to(room).emit('message', message);
+                } else {
+                    // Room is offline, persist the file
+                    log.info(`--> [room:${room}] Room offline, persisting file: ${route} (${fileBuffer.length} bytes)`);
+                    this.db.add(room, { 
+                        type: route, 
+                        data: {
+                            fileData: fileBuffer.toString('base64'),
+                            extraData
+                        },
+                        isFile: true 
+                    });
+                }
             }
         };
     }
@@ -180,12 +246,15 @@ export default class SxServer {
 
                 for (const msg of pendingMessages) {
                     const message = {
-                        meta: { type: msg.type },
+                        meta: { 
+                            type: msg.type,
+                            isFile: msg.isFile || false
+                        },
                         data: msg.data
                     };
 
                     this.io.to(room).emit('message', message);
-                    log.info(`--> [room:${room}] Sent pending message: ${msg.type}`, message);
+                    log.info(`--> [room:${room}] Sent pending ${msg.isFile ? 'file' : 'message'}: ${msg.type}`, message);
                 }
 
                 // Clear processed messages
