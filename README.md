@@ -34,7 +34,7 @@ sxServer
         // Validate token using your preferred logic or database
         return token === 'valid' ? { userId: 'user123' } : null;
     })
-    .onMessage('test_route', async (socket, data) => {
+    .onMessage('test_route', async (data, socket) => {
         // Handle the "test_route" message type
         return { status: 'ok', data, auth: socket.auth };
     });
@@ -118,7 +118,7 @@ try {
     console.log('CLIENT --> Joined room: user-room');
 
     // Set up message handlers for specific routes
-    client.onMessage('notification', async (socket, data) => {
+    client.onMessage('notification', async (data, socket) => {
         console.log('CLIENT --> Received notification:', data);
     });
 
@@ -146,7 +146,7 @@ new SxServer({ server, opts })
   Set a custom authentication handler. The function receives the client's token and socket, and should return a truthy value if authentication succeeds, or null/falsy if it fails.
 
 - **onMessage(type: string, handler: Function): SxServer**  
-  Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(socket, data)` parameters.
+  Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(data, socket)` parameters.
 
 - **to(room: string): Object**  
   Returns an object with a `send` method to send messages to a specific room. Messages are persisted if the room is offline and delivered when clients join.
@@ -193,7 +193,7 @@ new SxClient({ url })
   Leave a specific room. The client will no longer automatically rejoin this room on reconnection.
 
 - **onMessage(route: string, handler: Function): void**  
-  Register a handler for incoming messages of a specific type. The handler receives `(socket, data)` parameters.
+  Register a handler for incoming messages of a specific type. The handler receives `(data, socket)` parameters.
 
 **Auto-reconnection Features**
 - Automatic reconnection with exponential backoff

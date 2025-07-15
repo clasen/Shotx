@@ -9,7 +9,7 @@ sxServer
         // Return user data if token is valid, null otherwise
         return token === 'valid' ? { userId: 'user123' } : null;
     })
-    .onMessage('test_route', async (socket, data) => {
+    .onMessage('test_route', async (data, socket) => {
         return { status: 'ok', data, auth: socket.auth };
     });
 

@@ -11,6 +11,7 @@ export default class SxClient {
         this.isConnected = false;
         this.offlineQueue = [];
         this.joinedRooms = new Set(); // Track joined rooms for reconnection
+        this.messageHandlers = new Map(); // Track message handlers
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -90,6 +91,33 @@ export default class SxClient {
         return this.send('sx_join', { room });
     }
 
+    // Setup centralized message routing
+    _setupMessageRouting() {
+        if (!this.socket) return;
+
+        // Remove any existing listener to avoid duplicates
+        this.socket.off(this.routeEvent);
+
+        // Single listener that routes all messages
+        this.socket.on(this.routeEvent, async (message) => {
+            if (!message.meta || !message.meta.type) {
+                log.warn('> Received message without meta.type');
+                return;
+            }
+
+            const { type } = message.meta;
+            const handler = this.messageHandlers.get(type);
+
+            if (handler) {
+                try {
+                    await handler(message.data, this.socket);
+                } catch (error) {
+                    log.error(`> Error in message handler for route ${type}:`, error);
+                }
+            }
+        });
+    }
+
     // Connect to the server with a token
     async connect(token) {
         if (this.isConnected) {
@@ -101,13 +129,13 @@ export default class SxClient {
         return new Promise((resolve) => {
             let retryCount = 0;
             const maxRetryDelay = 30000; // Max 30 seconds
-            
+
             const attemptConnection = () => {
                 if (this.socket) {
                     this.socket.disconnect();
                 }
 
-                this.socket = io(this.url, { 
+                this.socket = io(this.url, {
                     auth: { token },
                     autoConnect: true,
                     reconnection: true,
@@ -120,6 +148,7 @@ export default class SxClient {
                     log.info('> connect');
                     this.isConnected = true;
                     retryCount = 0; // Reset retry count on successful connection
+                    this._setupMessageRouting(); // Setup message routing after connection
                 });
 
                 this.socket.on('connect_error', (error) => {
@@ -161,6 +190,21 @@ export default class SxClient {
         return this.emit(this.routeEvent, data, meta);
     }
 
+    async sendFile(route, fileBuffer, extraData = {}) {
+        if (!Buffer.isBuffer(fileBuffer)) {
+            throw new Error('File must be a Buffer');
+        }
+
+        const data = {
+            route,
+            fileData: fileBuffer.toString('base64'),
+            extraData
+        };
+
+        log.info(`> Sending file: ${route} (${fileBuffer.length} bytes)`);
+        return this.send('sx_file', data);
+    }
+
     async join(room) {
         const result = await this._joinRoom(room);
         this.joinedRooms.add(room); // Track joined room
@@ -181,14 +225,27 @@ export default class SxClient {
             return;
         }
 
-        this.socket.on(this.routeEvent, async (message) => {
-            if (message.meta && message.meta.type === route) {
-                try {
-                    await handler(this.socket, message.data);
-                } catch (error) {
-                    log.error(`> Error in message handler for route ${route}:`, error);
-                }
+        this.messageHandlers.set(route, handler);
+        log.info(`> Registered message handler for route: ${route}`);
+    }
+
+    onFile(route, handler) {
+        if (typeof route !== 'string' || typeof handler !== 'function') {
+            throw new Error('Invalid parameters for onFile');
+        }
+
+        // Register the file handler using the message system
+        this.onMessage('sx_file', async (messageData, socket) => {
+
+            const { route: fileRoute, fileData, extraData } = messageData;
+
+            // Only handle files for the specific route
+            if (fileRoute === route) {
+                // Convert base64 back to buffer
+                const fileBuffer = Buffer.from(fileData, 'base64');
+                await handler(fileBuffer, extraData, socket);
             }
         });
+        log.info(`> Registered file handler for route: ${route}`);
     }
 } 

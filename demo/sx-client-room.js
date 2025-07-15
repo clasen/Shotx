@@ -11,7 +11,7 @@ try {
     console.log('CLIENT --> Joined room: user1');
 
     // Set up message handlers
-    client.onMessage('notification', async (socket, data) => {
+    client.onMessage('notification', async (data, socket) => {
         console.log('CLIENT --> Received notification:', data);
     });
 
