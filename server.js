@@ -251,7 +251,6 @@ export default class SxServer {
         try {
             const pendingMessages = await this.db.values(room) || [];
 
-            console.log(pendingMessages);
             if (pendingMessages.length > 0) {
                 log.info(`--> [room:${room}] Processing ${pendingMessages.length} pending messages`);
 
