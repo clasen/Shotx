@@ -1,7 +1,6 @@
 import { Server } from 'socket.io';
 import LemonLog from 'lemonlog';
 import DeepBase from 'deepbase';
-import { fileTypeFromBuffer } from 'file-type';
 
 const log = new LemonLog("SxServer");
 
@@ -26,7 +25,6 @@ export default class SxServer {
         this.io = new Server(server, opts);
 
         this.messageHandlers = new Map();
-        this.fileHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
         this.db = new DeepBase({ name: 'shotx' });
 
@@ -75,14 +73,6 @@ export default class SxServer {
         return this;
     }
 
-    onFile(route, handler) {
-        if (typeof route !== 'string' || typeof handler !== 'function') {
-            throw new Error('Invalid parameters for onFile');
-        }
-        this.fileHandlers.set(route, handler);
-        return this;
-    }
-
     setupListeners() {
         this.io.on('connection', (socket) => {
             log.info(`<-- [${socket.id}] Client connected`);
@@ -118,45 +108,6 @@ export default class SxServer {
             socket.leave(data.room);
             log.info(`<-- [${socket.id}] Left room: ${data.room}`);
         });
-
-        // Listener for file messages with automatic type detection
-        this.onMessage('sx_file', async (data, socket) => {
-            const { route, fileData, extraData } = data;
-
-            const handler = this.fileHandlers.get(route);
-
-            if (!handler) {
-                log.warn(`<-- [${socket.id}] Unknown file route: ${route}`);
-                return;
-            }
-
-            try {
-                // Convert base64 back to buffer
-                const fileBuffer = Buffer.from(fileData, 'base64');
-
-                // Detect file type using magic numbers
-                const fileType = await fileTypeFromBuffer(fileBuffer);
-                const meta = {
-                    mimeType: fileType?.mime || 'application/octet-stream',
-                    extension: fileType?.ext || 'bin'
-                };
-
-                log.info(`<-- [${socket.id}] File detected: ${fileType.mimeType} (${fileBuffer.length} bytes)`);
-
-                // Create enhanced file data with detection info
-                const enhancedFileData = {
-                    meta,
-                    ...extraData
-                };
-
-                const result = await handler(fileBuffer, enhancedFileData, socket);
-                log.info(`<-- [${socket.id}] File processed: ${route} (${fileBuffer.length} bytes)`);
-                return result;
-            } catch (error) {
-                log.error(`<-- [${socket.id}] Error processing file:`, error);
-                throw error;
-            }
-        });
     }
 
     async handleMessage(socket, message, callback) {
@@ -189,11 +140,6 @@ export default class SxServer {
         }
     }
 
-    /**
-     * Send message to a specific room
-     * @param {string} room - Room name
-     * @returns {Object} - Object with send method
-     */
     to(room) {
         const roomSender = {
             send: (type, data) => {
@@ -215,38 +161,11 @@ export default class SxServer {
                     this.db.add(room, { type, data });
                 }
             },
-
-            sendFile: (route, fileBuffer, extraData = {}) => {
-                if (!Buffer.isBuffer(fileBuffer)) {
-                    throw new Error('File must be a Buffer');
-                }
-
-                fileTypeFromBuffer(fileBuffer).then(fileType => {
-                    extraData.meta = {
-                        mimeType: fileType?.mime || 'application/octet-stream',
-                        extension: fileType?.ext || 'bin'
-                    };
-
-                    // Use the internal message system
-                    const fileData = {
-                        route,
-                        fileData: fileBuffer.toString('base64'),
-                        extraData
-                    };
-
-                    // Reuse the send method to avoid duplicating offline logic
-                    roomSender.send('sx_file', fileData);
-                });
-            }
         };
 
         return roomSender;
     }
 
-    /**
-     * Process pending messages for a room when a client joins
-     * @param {string} room - Room name
-     */
     async processRoomMessages(room) {
         try {
             const pendingMessages = await this.db.values(room) || [];

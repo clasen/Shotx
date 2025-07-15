@@ -190,21 +190,6 @@ export default class SxClient {
         return this.emit(this.routeEvent, data, meta);
     }
 
-    async sendFile(route, fileBuffer, extraData = {}) {
-        if (!Buffer.isBuffer(fileBuffer)) {
-            throw new Error('File must be a Buffer');
-        }
-
-        const data = {
-            route,
-            fileData: fileBuffer.toString('base64'),
-            extraData
-        };
-
-        log.info(`> Sending file: ${route} (${fileBuffer.length} bytes)`);
-        return this.send('sx_file', data);
-    }
-
     async join(room) {
         const result = await this._joinRoom(room);
         this.joinedRooms.add(room); // Track joined room
@@ -227,25 +212,5 @@ export default class SxClient {
 
         this.messageHandlers.set(route, handler);
         log.info(`> Registered message handler for route: ${route}`);
-    }
-
-    onFile(route, handler) {
-        if (typeof route !== 'string' || typeof handler !== 'function') {
-            throw new Error('Invalid parameters for onFile');
-        }
-
-        // Register the file handler using the message system
-        this.onMessage('sx_file', async (messageData, socket) => {
-
-            const { route: fileRoute, fileData, extraData } = messageData;
-
-            // Only handle files for the specific route
-            if (fileRoute === route) {
-                // Convert base64 back to buffer
-                const fileBuffer = Buffer.from(fileData, 'base64');
-                await handler(fileBuffer, extraData, socket);
-            }
-        });
-        log.info(`> Registered file handler for route: ${route}`);
     }
 } 
