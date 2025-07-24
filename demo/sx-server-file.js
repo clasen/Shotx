@@ -12,22 +12,17 @@ if (!existsSync(uploadsDir)) {
     mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Set authentication handler
-sxServer.setAuthHandler(async (token, socket) => {
-    return token === 'valid' ? { userId: 'user123' } : null;
-});
-
 server.listen(3000, () => {
     console.log('🚀 Server running at http://localhost:3000');
     console.log('📁 File handling enabled');
     console.log(`💾 Files will be saved to: ${uploadsDir}`);
 
-    sxServer.onMessage('audio', async (data, socket) => {
+    sxServer.onMessage('upload', async (data, socket) => {
         try {
             // Generate unique filename
             const timestamp = Date.now();
             const filename = `upload_${timestamp}`;
-            const uniqueFilename = `${filename}.wav`;
+            const uniqueFilename = `${filename}.jpg`;
             const filePath = join(uploadsDir, uniqueFilename);
 
             // Save file to disk
@@ -37,9 +32,10 @@ server.listen(3000, () => {
             console.log('SERVER --> Extra data:', data);
             console.log(`SERVER --> Saved to: ${filePath}`);
             console.log(`SERVER --> File size: ${data.length} bytes`);
-
+            return { success: true };
         } catch (error) {
             console.error('SERVER --> Error saving file:', error);
+            return { success: false, error: error.message };
         }
     });
 });

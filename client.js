@@ -22,14 +22,15 @@ export default class SxClient {
         // Add UUID to meta
         meta.id = uuidv7();
 
-        // If offline, queue the message
+        // Si está offline, devolvemos una promesa que se resuelve/rechaza cuando se procese
         if (!this.isConnected) {
             log.info('> Offline. Queuing message:', data);
-            this.offlineQueue.push({ eventName, data, meta });
-            return;
+            return new Promise((resolve, reject) => {
+                this.offlineQueue.push({ eventName, data, meta, resolve, reject });
+            });
         }
 
-        // If online, emit immediately
+        // Si está online, emitimos inmediatamente
         return this._emitMessage(eventName, data, meta);
     }
 
@@ -61,11 +62,20 @@ export default class SxClient {
         }
 
         while (this.offlineQueue.length > 0) {
-            const { eventName, data, meta } = this.offlineQueue.shift();
+            const { eventName, data, meta, resolve, reject } = this.offlineQueue.shift();
             try {
-                await this._emitMessage(eventName, data, meta);
+                // Si hay resolve/reject (mensaje encolado offline), los usamos
+                if (resolve && reject) {
+                    this._emitMessage(eventName, data, meta)
+                        .then(resolve)
+                        .catch(reject);
+                } else {
+                    // Mensaje antiguo, solo enviamos
+                    await this._emitMessage(eventName, data, meta);
+                }
             } catch (error) {
                 log.error('> Error processQueue', error);
+                if (reject) reject(error);
             }
         }
     }
