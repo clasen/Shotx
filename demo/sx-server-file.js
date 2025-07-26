@@ -4,7 +4,7 @@ import { join, resolve } from 'path';
 import SxServer from '../server.js';
 
 const server = createServer();
-const sxServer = new SxServer({ server });
+const sxServer = new SxServer(server);
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = join(process.cwd(), 'uploads');

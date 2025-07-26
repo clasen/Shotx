@@ -5,8 +5,19 @@ import { v7 as uuidv7 } from 'uuid';
 const log = new LemonLog("SxClient");
 
 export default class SxClient {
-    constructor({ url } = {}) {
-        this.url = url || 'http://localhost:3000';
+    constructor(url = 'http://localhost:3000', opts = {}) {
+        this.url = url;
+
+        const defaultOpts = {
+            path: '/shotx/',
+            autoConnect: true,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 30000,
+            maxReconnectionAttempts: Infinity
+        };
+
+        this.opts = { ...defaultOpts, ...opts };
         this.socket = null;
         this.isConnected = false;
         this.offlineQueue = [];
@@ -138,21 +149,13 @@ export default class SxClient {
 
         return new Promise((resolve) => {
             let retryCount = 0;
-            const maxRetryDelay = 30000; // Max 30 seconds
 
             const attemptConnection = () => {
                 if (this.socket) {
                     this.socket.disconnect();
                 }
-
-                this.socket = io(this.url, {
-                    auth: { token },
-                    autoConnect: true,
-                    reconnection: true,
-                    reconnectionDelay: 1000,
-                    reconnectionDelayMax: maxRetryDelay,
-                    maxReconnectionAttempts: Infinity
-                });
+                this.opts.auth = { token };
+                this.socket = io(this.url, this.opts);
 
                 this.socket.on('connect', () => {
                     log.info('> connect');
@@ -163,7 +166,7 @@ export default class SxClient {
 
                 this.socket.on('connect_error', (error) => {
                     retryCount++;
-                    const delay = Math.min(1000 * Math.pow(2, retryCount - 1), maxRetryDelay);
+                    const delay = Math.min(1000 * Math.pow(2, retryCount - 1), this.opts.reconnectionDelayMax);
                     log.warn(`> connect_error (attempt ${retryCount}): ${error.message}, retrying in ${delay}ms`);
                     this.isConnected = false;
                     // Don't reject, let Socket.IO handle reconnection

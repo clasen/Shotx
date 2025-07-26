@@ -6,23 +6,29 @@ const log = new LemonLog("SxServer");
 
 export default class SxServer {
 
-    constructor({ server, opts } = {}) {
+    constructor(server, opts = {}, { auto404 = true } = {}) {
         if (!server) {
             throw new Error('HTTP(s) server must be provided');
         }
 
-        opts = opts || {};
-
-        if (!opts.cors) {
-            opts.cors = {
+        const defaultOptions = {
+            path: '/shotx/',
+            cors: {
                 origin: '*',
                 methods: ['GET', 'POST']
-            }
+            },
+            maxHttpBufferSize: (2 * 1024 * 1024)
         }
-
-        opts.maxHttpBufferSize = opts.maxHttpBufferSize || (2 * 1024 * 1024); // 2 MB
-
+        opts = { ...defaultOptions, ...opts };
         this.io = new Server(server, opts);
+
+        if (auto404) {
+            server.on('request', (req, res) => {
+                if (req.url && req.url.startsWith(opts.path)) return;
+                res.writeHead(404);
+                res.end();
+            });
+        }
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;

@@ -26,7 +26,7 @@ import { createServer } from 'http';
 import SxServer from 'shotx/server';
 
 const server = createServer();
-const sxServer = new SxServer({ server });
+const sxServer = new SxServer(server);
 
 // Set a custom authentication handler and register message handlers
 sxServer
@@ -82,7 +82,7 @@ import { createServer } from 'http';
 import SxServer from 'shotx/server';
 
 const server = createServer();
-const sxServer = new SxServer({ server });
+const sxServer = new SxServer(server);
 
 sxServer.setAuthHandler(async (token, socket) => {
     return token === 'valid' ? { userId: 'user123' } : null;
@@ -135,7 +135,7 @@ The `SxServer` class provides a framework for building the server side of your r
 
 **Constructor**
 ```javascript
-new SxServer({ server, opts })
+new SxServer(server, opts)
 ```
 - `server` (required): An instance of an HTTP(s) server that Socket.IO will attach to.
 - `opts` (optional): Socket.IO server options. CORS is configured by default to allow all origins.
