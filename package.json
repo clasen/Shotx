@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.4.0",
+  "version": "1.4.2",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
