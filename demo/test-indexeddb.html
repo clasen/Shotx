@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shotx IndexedDB Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .log {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        button {
+            margin: 5px;
+            padding: 10px 15px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>Shotx IndexedDB Persistence Test</h1>
+    
+    <div id="status" class="status disconnected">
+        Status: Disconnected
+    </div>
+    
+    <div>
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <button onclick="sendMessage()">Send Message</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+    </div>
+    
+    <div class="log" id="log"></div>
+
+    <script type="module">
+        import SxClient from './client-browser.js';
+        
+        let client;
+        let messageCount = 0;
+        
+        function log(message) {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.textContent += `[${timestamp}] ${message}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function updateStatus(connected) {
+            const statusDiv = document.getElementById('status');
+            if (connected) {
+                statusDiv.textContent = 'Status: Connected';
+                statusDiv.className = 'status connected';
+            } else {
+                statusDiv.textContent = 'Status: Disconnected';
+                statusDiv.className = 'status disconnected';
+            }
+        }
+        
+        window.connect = async function() {
+            try {
+                if (!client) {
+                    client = new SxClient('http://localhost:3000');
+                    log('Client created with IndexedDB support: ' + client.useIndexedDB);
+                }
+                
+                log('Attempting to connect...');
+                await client.connect('valid');
+                log('Connected successfully!');
+                updateStatus(true);
+                
+            } catch (error) {
+                log('Connection failed: ' + error.message);
+                updateStatus(false);
+            }
+        };
+        
+        window.disconnect = function() {
+            if (client) {
+                client.disconnect();
+                log('Disconnected');
+                updateStatus(false);
+            }
+        };
+        
+        window.sendMessage = async function() {
+            if (!client) {
+                log('No client instance. Create one first.');
+                return;
+            }
+            
+            messageCount++;
+            const message = { count: messageCount, timestamp: Date.now() };
+            
+            try {
+                log(`Sending message ${messageCount}...`);
+                const response = await client.send('test_route', message);
+                log(`Message ${messageCount} sent successfully: ${JSON.stringify(response)}`);
+            } catch (error) {
+                log(`Message ${messageCount} failed: ${error.message}`);
+            }
+        };
+        
+        window.clearLogs = function() {
+            document.getElementById('log').textContent = '';
+        };
+        
+        // Initialize
+        log('Shotx IndexedDB Test initialized');
+        log('Instructions:');
+        log('1. Start the demo server: node demo/sx-server.js');
+        log('2. Click Connect to establish connection');
+        log('3. Click Disconnect to test offline queueing');
+        log('4. Send messages while offline to test IndexedDB persistence');
+        log('5. Reconnect to see messages being processed from IndexedDB');
+        log('');
+    </script>
+</body>
+</html>

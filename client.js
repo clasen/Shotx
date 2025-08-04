@@ -26,6 +26,125 @@ export default class SxClient {
 
         // Add default event name for routing
         this.routeEvent = 'message';
+
+        // IndexedDB support
+        this.db = null;
+        this.dbName = 'ShotxOfflineQueue';
+        this.dbVersion = 1;
+        this.storeName = 'messages';
+        this.useIndexedDB = this._checkIndexedDBSupport();
+
+        // Initialize IndexedDB if available
+        if (this.useIndexedDB) {
+            this._initIndexedDB();
+        }
+    }
+
+    // ============ IndexedDB Methods ============
+    _checkIndexedDBSupport() {
+        return typeof window !== 'undefined' && 'indexedDB' in window;
+    }
+
+    async _initIndexedDB() {
+        if (!this.useIndexedDB) return;
+
+        try {
+            this.db = await new Promise((resolve, reject) => {
+                const request = indexedDB.open(this.dbName, this.dbVersion);
+
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => resolve(request.result);
+
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains(this.storeName)) {
+                        const store = db.createObjectStore(this.storeName, { keyPath: 'id', autoIncrement: true });
+                        store.createIndex('timestamp', 'timestamp', { unique: false });
+                    }
+                };
+            });
+
+            // Load persisted messages into memory queue
+            await this._loadPersistedMessages();
+            log.info('> IndexedDB initialized successfully');
+        } catch (error) {
+            log.warn('> Failed to initialize IndexedDB:', error.message);
+            this.useIndexedDB = false;
+        }
+    }
+
+    async _saveMessageToIndexedDB(message) {
+        if (!this.useIndexedDB || !this.db) return;
+
+        try {
+            const transaction = this.db.transaction([this.storeName], 'readwrite');
+            const store = transaction.objectStore(this.storeName);
+            
+            const messageWithTimestamp = {
+                ...message,
+                timestamp: Date.now()
+            };
+            
+            await new Promise((resolve, reject) => {
+                const request = store.add(messageWithTimestamp);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        } catch (error) {
+            log.warn('> Failed to save message to IndexedDB:', error.message);
+        }
+    }
+
+    async _loadPersistedMessages() {
+        if (!this.useIndexedDB || !this.db) return;
+
+        try {
+            const transaction = this.db.transaction([this.storeName], 'readonly');
+            const store = transaction.objectStore(this.storeName);
+            
+            const messages = await new Promise((resolve, reject) => {
+                const request = store.getAll();
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+
+            // Sort by timestamp and add to queue
+            messages.sort((a, b) => a.timestamp - b.timestamp);
+            for (const message of messages) {
+                // Remove timestamp and id before adding to queue
+                const { timestamp, id, ...queueMessage } = message;
+                // Add null resolve/reject for persisted messages since they can't be serialized
+                queueMessage.resolve = null;
+                queueMessage.reject = null;
+                this.offlineQueue.push(queueMessage);
+            }
+
+            if (messages.length > 0) {
+                log.info(`> Loaded ${messages.length} persisted messages from IndexedDB:`);
+                messages.forEach((msg, i) => {
+                    log.info(`  ${i + 1}. ${msg.meta?.type || msg.eventName} - ${JSON.stringify(msg.data)}`);
+                });
+            }
+        } catch (error) {
+            log.warn('> Failed to load persisted messages:', error.message);
+        }
+    }
+
+    async _clearPersistedMessages() {
+        if (!this.useIndexedDB || !this.db) return;
+
+        try {
+            const transaction = this.db.transaction([this.storeName], 'readwrite');
+            const store = transaction.objectStore(this.storeName);
+            
+            await new Promise((resolve, reject) => {
+                const request = store.clear();
+                request.onsuccess = () => resolve();
+                request.onerror = () => reject(request.error);
+            });
+        } catch (error) {
+            log.warn('> Failed to clear persisted messages:', error.message);
+        }
     }
 
     // ============ Main send method ============
@@ -37,7 +156,15 @@ export default class SxClient {
         if (!this.isConnected) {
             log.info('> Offline. Queuing message:', data);
             return new Promise((resolve, reject) => {
-                this.offlineQueue.push({ eventName, data, meta, resolve, reject });
+                const queueMessage = { eventName, data, meta, resolve, reject };
+                this.offlineQueue.push(queueMessage);
+                
+                // Persist to IndexedDB if available
+                if (this.useIndexedDB) {
+                    // Create a serializable version without resolve/reject functions
+                    const persistableMessage = { eventName, data, meta };
+                    this._saveMessageToIndexedDB(persistableMessage);
+                }
             });
         }
 
@@ -72,22 +199,34 @@ export default class SxClient {
             log.info(`> processQueue (${this.offlineQueue.length} messages).`);
         }
 
+        const originalQueueLength = this.offlineQueue.length;
+        let processedCount = 0;
+
         while (this.offlineQueue.length > 0) {
             const { eventName, data, meta, resolve, reject } = this.offlineQueue.shift();
             try {
                 // Si hay resolve/reject (mensaje encolado offline), los usamos
                 if (resolve && reject) {
+                    log.info(`> Processing queued message (live): ${meta.type || eventName}`);
                     this._emitMessage(eventName, data, meta)
                         .then(resolve)
                         .catch(reject);
                 } else {
-                    // Mensaje antiguo, solo enviamos
+                    // Mensaje persistido desde IndexedDB, solo enviamos
+                    log.info(`> Processing persisted message: ${meta.type || eventName}`, data);
                     await this._emitMessage(eventName, data, meta);
                 }
+                processedCount++;
             } catch (error) {
                 log.error('> Error processQueue', error);
                 if (reject) reject(error);
             }
+        }
+
+        // Clear IndexedDB after successfully processing all messages
+        if (processedCount === originalQueueLength && this.useIndexedDB) {
+            await this._clearPersistedMessages();
+            log.info('> Cleared persisted messages from IndexedDB');
         }
     }
 

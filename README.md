@@ -11,7 +11,7 @@ Shotx features built-in token-based authentication, asynchronous message handlin
 - **Room Support**: Join/leave rooms with automatic message persistence for offline clients.
 - **Custom Message Handlers**: Register specific handlers for different message types.
 - **Asynchronous Authentication**: Use async functions to validate tokens and authorize connections.
-- **Message Persistence**: Offline messages are queued and delivered when clients reconnect.
+- **Message Persistence**: Offline messages are queued and delivered when clients reconnect. In browser environments, messages are persisted using IndexedDB for durability across page reloads.
 
 
 ## Usage
@@ -240,11 +240,43 @@ See `demo/sx-server.js` and `demo/sx-client.js` for basic examples.
 
 See `demo/sx-server-room.js` and `demo/sx-client-room.js` for room-based examples.
 
+## Demo Usage
+
+The `demo/` directory contains working examples:
+
+### Node.js Demo
+- **sx-server.js**: Basic server setup with token validation and test_route handler
+- **sx-client.js**: Client that connects and sends periodic messages
+- Run server first, then client to see real-time communication
+
+### Browser Demo (IndexedDB Testing)
+- **index.html**: Interactive web interface to test IndexedDB persistence
+- **package.json**: Vite configuration for browser testing
+
+To test IndexedDB persistence in browser:
+
+1. **Start the demo server:**
+   ```bash
+   DEBUG=Sx* node demo/sx-server.js
+   ```
+
+2. **Install dependencies and start Vite dev server:**
+   ```bash
+   cd demo
+   npm install
+   npm run dev
+   ```
+
+3. **Test offline persistence:**
+   - Send messages while disconnected (they get queued in IndexedDB)
+   - Refresh the page (messages persist across sessions)
+   - Connect to see persisted messages being processed automatically
+
 ## Dependencies
 
 - `socket.io`: WebSocket communication
 - `socket.io-client`: Client-side WebSocket communication
-- `deepbase`: Message persistence for offline rooms
+- `deepbase`: Message server persistence for offline rooms
 - `lemonlog`: Structured logging
 - `uuid`: UUID generation for message IDs
 
