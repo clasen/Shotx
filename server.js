@@ -2,14 +2,14 @@ import { Server } from 'socket.io';
 import LemonLog from 'lemonlog';
 import DeepBase from 'deepbase';
 
-const log = new LemonLog("SxServer");
-
 export default class SxServer {
 
-    constructor(server, opts = {}, { auto404 = true } = {}) {
+    constructor(server, opts = {}, { auto404 = true, debug = 'none' } = {}) {
         if (!server) {
             throw new Error('HTTP(s) server must be provided');
         }
+
+        this.log = new LemonLog("SxServer", debug);
 
         const defaultOptions = {
             path: '/shotx/',
@@ -39,7 +39,7 @@ export default class SxServer {
             try {
                 const token = socket.handshake?.auth?.token;
                 if (!token) {
-                    log.warn(`<-- [${socket.id}] (AUTH_NULL) Authentication failed: No token provided`);
+                    this.log.warn(`<-- [${socket.id}] (AUTH_NULL) Authentication failed: No token provided`);
                     return next(new Error('AUTH_NULL'));
                 }
                 const auth = await this.authHandler(token, socket);
@@ -47,11 +47,11 @@ export default class SxServer {
                     socket.auth = auth;
                     next();
                 } else {
-                    log.warn(`<-- [${socket.id}] (AUTH_FAIL) Authentication failed: Invalid credentials`);
+                    this.log.warn(`<-- [${socket.id}] (AUTH_FAIL) Authentication failed: Invalid credentials`);
                     return next(new Error('AUTH_FAIL'));
                 }
             } catch (error) {
-                log.error(`<-- [${socket.id}] (AUTH_ERROR) Authentication error`, error);
+                this.log.error(`<-- [${socket.id}] (AUTH_ERROR) Authentication error`, error);
                 next(new Error('AUTH_ERROR'));
             }
         });
@@ -81,7 +81,7 @@ export default class SxServer {
 
     setupListeners() {
         this.io.on('connection', (socket) => {
-            log.info(`<-- [${socket.id}] Client connected`);
+            this.log.info(`<-- [${socket.id}] Client connected`);
 
             // Send auth information to client
             socket.emit('auth_success', socket.auth);
@@ -93,26 +93,26 @@ export default class SxServer {
 
             // Listener for disconnection
             socket.on('disconnect', () => {
-                log.info(`<-- [${socket.id}] Client disconnected`);
+                this.log.info(`<-- [${socket.id}] Client disconnected`);
             });
 
             // Listener for errors
             socket.on('error', (error) => {
-                log.error(`<-- [${socket.id}] Error:`, error);
+                this.log.error(`<-- [${socket.id}] Error:`, error);
             });
         });
 
         // Listener for join room
         this.onMessage('sx_join', async (data, socket) => {
             socket.join(data.room);
-            log.info(`<-- [${socket.id}] Joined room: ${data.room}`);
+            this.log.info(`<-- [${socket.id}] Joined room: ${data.room}`);
             this.processRoomMessages(data.room);
         });
 
         // Listener for leave room
         this.onMessage('sx_leave', async (data, socket) => {
             socket.leave(data.room);
-            log.info(`<-- [${socket.id}] Left room: ${data.room}`);
+            this.log.info(`<-- [${socket.id}] Left room: ${data.room}`);
         });
     }
 
@@ -130,7 +130,7 @@ export default class SxServer {
                 return callback({ meta: { success: false, code: 2002, error: 'Invalid message type' }, data: null });
             }
 
-            log.info(`<-- [${socket.id}] - ${meta.type}`, message);
+            this.log.info(`<-- [${socket.id}] - ${meta.type}`, message);
 
             // Handle regular message
             const handler = this.messageHandlers.get(meta.type);
@@ -141,7 +141,7 @@ export default class SxServer {
             const result = await handler(data, socket);
             callback({ meta: { success: true }, data: result });
         } catch (error) {
-            log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
+            this.log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
             callback({ meta: { success: false, code: 2004, error: error.message || 'Error processing message' }, data: null });
         }
     }
@@ -159,11 +159,11 @@ export default class SxServer {
 
                 if (roomSockets && roomSockets.size > 0) {
                     // Room has connected clients, send message immediately
-                    log.info(`--> [room:${room}] Sending message: ${type}`, message);
+                    this.log.info(`--> [room:${room}] Sending message: ${type}`, message);
                     this.io.to(room).emit('message', message);
                 } else {
                     // Room is offline, persist the message
-                    log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
+                    this.log.info(`--> [room:${room}] Room offline, persisting message: ${type}`, message);
                     this.db.add(room, { type, data });
                 }
             },
@@ -177,7 +177,7 @@ export default class SxServer {
             const pendingMessages = await this.db.values(room) || [];
 
             if (pendingMessages.length > 0) {
-                log.info(`--> [room:${room}] Processing ${pendingMessages.length} pending messages`);
+                this.log.info(`--> [room:${room}] Processing ${pendingMessages.length} pending messages`);
 
                 for (const msg of pendingMessages) {
                     const message = {
@@ -188,14 +188,14 @@ export default class SxServer {
                     };
 
                     this.io.to(room).emit('message', message);
-                    log.info(`--> [room:${room}] Sent pending message: ${msg.type}`, message);
+                    this.log.info(`--> [room:${room}] Sent pending message: ${msg.type}`, message);
                 }
 
                 // Clear processed messages
                 this.db.del(room);
             }
         } catch (error) {
-            log.error(`Error processing room messages for ${room}:`, error);
+            this.log.error(`Error processing room messages for ${room}:`, error);
         }
     }
 }

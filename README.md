@@ -135,10 +135,12 @@ The `SxServer` class provides a framework for building the server side of your r
 
 **Constructor**
 ```javascript
-new SxServer(server, opts)
+new SxServer(server, opts, { auto404, debug })
 ```
 - `server` (required): An instance of an HTTP(s) server that Socket.IO will attach to.
 - `opts` (optional): Socket.IO server options. CORS is configured by default to allow all origins.
+- `auto404` (optional): Automatically respond with 404 to non-Shotx HTTP requests. Defaults to `true`.
+- `debug` (optional): Log level for the server instance. Defaults to `'none'`. See [Logging](#logging).
 
 **Methods**
 
@@ -167,10 +169,11 @@ The `SxClient` class simplifies creating a client that connects to a Shotx serve
 
 **Constructor**
 ```javascript
-new SxClient({ url })
+new SxClient(url, opts, { debug })
 ```
-
 - `url` (optional): The server URL. Defaults to `http://localhost:3000`.
+- `opts` (optional): Socket.IO client options.
+- `debug` (optional): Log level for the client instance. Defaults to `'none'`. See [Logging](#logging).
 
 **Methods**
 
@@ -229,6 +232,58 @@ All messages use a standardized format:
 - `AUTH_NULL`: No authentication token provided
 - `AUTH_FAIL`: Invalid authentication credentials
 - `AUTH_ERROR`: Authentication process error
+
+## Logging
+
+Shotx uses [LemonLog](https://www.npmjs.com/package/lemonlog) for structured logging. By default, logging is set to `'none'` (silent). You can enable it by passing a `debug` level to the constructor.
+
+**Available log levels** (from most to least verbose):
+
+| Level   | Description                          |
+|---------|--------------------------------------|
+| `debug` | All logs including debug details     |
+| `info`  | Informational messages and above     |
+| `warn`  | Warnings and errors only             |
+| `error` | Errors only                          |
+| `none`  | Silent (default)                     |
+
+**Enabling logs on the server:**
+
+```javascript
+const sxServer = new SxServer(server, {}, { debug: 'info' });
+```
+
+**Enabling logs on the client:**
+
+```javascript
+const client = new SxClient('http://localhost:3000', {}, { debug: 'info' });
+```
+
+**Important:** LemonLog is built on top of the [debug](https://www.npmjs.com/package/debug) package, so you also need to set the `DEBUG` environment variable to see the output:
+
+```bash
+# Enable all Shotx logs
+DEBUG=Sx* node your-app.js
+
+# Enable only server logs
+DEBUG=SxServer* node your-app.js
+
+# Enable only client logs
+DEBUG=SxClient* node your-app.js
+```
+
+In browser environments, set `localStorage.debug` instead:
+
+```javascript
+localStorage.debug = 'Sx*';
+```
+
+The log instance is also accessible as `this.log` on both `SxServer` and `SxClient` instances, in case you need to log from outside the class:
+
+```javascript
+const sxServer = new SxServer(server, {}, { debug: 'info' });
+sxServer.log.info('Custom log message');
+```
 
 ## Examples
 

@@ -2,11 +2,10 @@ import { io } from 'socket.io-client';
 import LemonLog from 'lemonlog';
 import { v7 as uuidv7 } from 'uuid';
 
-const log = new LemonLog("SxClient");
-
 export default class SxClient {
-    constructor(url = 'http://localhost:3000', opts = {}) {
+    constructor(url = 'http://localhost:3000', opts = {}, { debug = 'none' } = {}) {
         this.url = url;
+        this.log = new LemonLog("SxClient", debug);
 
         const defaultOpts = {
             path: '/shotx/',
@@ -66,9 +65,9 @@ export default class SxClient {
 
             // Load persisted messages into memory queue
             await this._loadPersistedMessages();
-            log.info('> IndexedDB initialized successfully');
+            this.log.info('> IndexedDB initialized successfully');
         } catch (error) {
-            log.warn('> Failed to initialize IndexedDB:', error.message);
+            this.log.warn('> Failed to initialize IndexedDB:', error.message);
             this.useIndexedDB = false;
         }
     }
@@ -91,7 +90,7 @@ export default class SxClient {
                 request.onerror = () => reject(request.error);
             });
         } catch (error) {
-            log.warn('> Failed to save message to IndexedDB:', error.message);
+            this.log.warn('> Failed to save message to IndexedDB:', error.message);
         }
     }
 
@@ -120,13 +119,13 @@ export default class SxClient {
             }
 
             if (messages.length > 0) {
-                log.info(`> Loaded ${messages.length} persisted messages from IndexedDB:`);
+                this.log.info(`> Loaded ${messages.length} persisted messages from IndexedDB:`);
                 messages.forEach((msg, i) => {
-                    log.info(`  ${i + 1}. ${msg.meta?.type || msg.eventName} - ${JSON.stringify(msg.data)}`);
+                    this.log.info(`  ${i + 1}. ${msg.meta?.type || msg.eventName} - ${JSON.stringify(msg.data)}`);
                 });
             }
         } catch (error) {
-            log.warn('> Failed to load persisted messages:', error.message);
+            this.log.warn('> Failed to load persisted messages:', error.message);
         }
     }
 
@@ -143,7 +142,7 @@ export default class SxClient {
                 request.onerror = () => reject(request.error);
             });
         } catch (error) {
-            log.warn('> Failed to clear persisted messages:', error.message);
+            this.log.warn('> Failed to clear persisted messages:', error.message);
         }
     }
 
@@ -154,7 +153,7 @@ export default class SxClient {
 
         // Si está offline, devolvemos una promesa que se resuelve/rechaza cuando se procese
         if (!this.isConnected) {
-            log.info('> Offline. Queuing message:', data);
+            this.log.info('> Offline. Queuing message:', data);
             return new Promise((resolve, reject) => {
                 const queueMessage = { eventName, data, meta, resolve, reject };
                 this.offlineQueue.push(queueMessage);
@@ -176,7 +175,7 @@ export default class SxClient {
     _emitMessage(eventName, data, meta = {}) {
         return new Promise((resolve, reject) => {
             const message = { meta, data };
-            log.info(`> emit: ${eventName}`, message);
+            this.log.info(`> emit: ${eventName}`, message);
 
             // Emit event to server
             this.socket.emit(eventName, message, (response) => {
@@ -196,7 +195,7 @@ export default class SxClient {
     async processQueue() {
         if (!this.isConnected) return;
         if (this.offlineQueue.length > 0) {
-            log.info(`> processQueue (${this.offlineQueue.length} messages).`);
+            this.log.info(`> processQueue (${this.offlineQueue.length} messages).`);
         }
 
         const originalQueueLength = this.offlineQueue.length;
@@ -207,18 +206,18 @@ export default class SxClient {
             try {
                 // Si hay resolve/reject (mensaje encolado offline), los usamos
                 if (resolve && reject) {
-                    log.info(`> Processing queued message (live): ${meta.type || eventName}`);
+                    this.log.info(`> Processing queued message (live): ${meta.type || eventName}`);
                     this._emitMessage(eventName, data, meta)
                         .then(resolve)
                         .catch(reject);
                 } else {
                     // Mensaje persistido desde IndexedDB, solo enviamos
-                    log.info(`> Processing persisted message: ${meta.type || eventName}`, data);
+                    this.log.info(`> Processing persisted message: ${meta.type || eventName}`, data);
                     await this._emitMessage(eventName, data, meta);
                 }
                 processedCount++;
             } catch (error) {
-                log.error('> Error processQueue', error);
+                this.log.error('> Error processQueue', error);
                 if (reject) reject(error);
             }
         }
@@ -226,7 +225,7 @@ export default class SxClient {
         // Clear IndexedDB after successfully processing all messages
         if (processedCount === originalQueueLength && this.useIndexedDB) {
             await this._clearPersistedMessages();
-            log.info('> Cleared persisted messages from IndexedDB');
+            this.log.info('> Cleared persisted messages from IndexedDB');
         }
     }
 
@@ -234,14 +233,14 @@ export default class SxClient {
     async rejoinRooms() {
         if (!this.isConnected || this.joinedRooms.size === 0) return;
 
-        log.info(`> Rejoining ${this.joinedRooms.size} rooms after reconnection`);
+        this.log.info(`> Rejoining ${this.joinedRooms.size} rooms after reconnection`);
 
         for (const room of this.joinedRooms) {
             try {
                 await this._joinRoom(room);
-                log.info(`> Rejoined room: ${room}`);
+                this.log.info(`> Rejoined room: ${room}`);
             } catch (error) {
-                log.error(`> Failed to rejoin room ${room}:`, error);
+                this.log.error(`> Failed to rejoin room ${room}:`, error);
             }
         }
     }
@@ -261,7 +260,7 @@ export default class SxClient {
         // Single listener that routes all messages
         this.socket.on(this.routeEvent, async (message) => {
             if (!message.meta || !message.meta.type) {
-                log.warn('> Received message without meta.type');
+                this.log.warn('> Received message without meta.type');
                 return;
             }
 
@@ -272,7 +271,7 @@ export default class SxClient {
                 try {
                     await handler(message.data, this.socket);
                 } catch (error) {
-                    log.error(`> Error in message handler for route ${type}:`, error);
+                    this.log.error(`> Error in message handler for route ${type}:`, error);
                 }
             }
         });
@@ -297,7 +296,7 @@ export default class SxClient {
                 this.socket = io(this.url, this.opts);
 
                 this.socket.on('connect', () => {
-                    log.info('> connect');
+                    this.log.info('> connect');
                     this.isConnected = true;
                     retryCount = 0; // Reset retry count on successful connection
                     this._setupMessageRouting(); // Setup message routing after connection
@@ -306,18 +305,18 @@ export default class SxClient {
                 this.socket.on('connect_error', (error) => {
                     retryCount++;
                     const delay = Math.min(1000 * Math.pow(2, retryCount - 1), this.opts.reconnectionDelayMax);
-                    log.warn(`> connect_error (attempt ${retryCount}): ${error.message}, retrying in ${delay}ms`);
+                    this.log.warn(`> connect_error (attempt ${retryCount}): ${error.message}, retrying in ${delay}ms`);
                     this.isConnected = false;
                     // Don't reject, let Socket.IO handle reconnection
                 });
 
                 this.socket.on('disconnect', () => {
-                    log.info('> disconnect');
+                    this.log.info('> disconnect');
                     this.isConnected = false;
                 });
 
                 this.socket.on('auth_success', async (data) => {
-                    log.info('> auth_success', data);
+                    this.log.info('> auth_success', data);
                     await this.processQueue();
                     await this.rejoinRooms();
                     resolve(data);
@@ -330,7 +329,7 @@ export default class SxClient {
 
     disconnect() {
         if (this.socket) {
-            log.info('> Disconnecting');
+            this.log.info('> Disconnecting');
             this.isConnected = false;
             this.socket.disconnect();
             this.socket = null;
@@ -345,24 +344,24 @@ export default class SxClient {
     async join(room) {
         const result = await this._joinRoom(room);
         this.joinedRooms.add(room); // Track joined room
-        log.info(`> Joined room: ${room}`);
+        this.log.info(`> Joined room: ${room}`);
         return result;
     }
 
     async leave(room) {
         const result = await this.send('sx_leave', { room });
         this.joinedRooms.delete(room); // Remove from tracked rooms
-        log.info(`> Left room: ${room}`);
+        this.log.info(`> Left room: ${room}`);
         return result;
     }
 
     onMessage(route, handler) {
         if (!this.socket) {
-            log.warn('> Cannot set message handler - not connected');
+            this.log.warn('> Cannot set message handler - not connected');
             return;
         }
 
         this.messageHandlers.set(route, handler);
-        log.info(`> Registered message handler for route: ${route}`);
+        this.log.info(`> Registered message handler for route: ${route}`);
     }
 } 

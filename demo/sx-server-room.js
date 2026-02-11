@@ -2,7 +2,7 @@ import { createServer } from 'http';
 import { SxServer } from '../index.js';
 
 const server = createServer();
-const sxServer = new SxServer(server);
+const sxServer = new SxServer(server, {}, { debug: 'debug' });
 
 sxServer
     .setAuthHandler(async (token, socket) => {

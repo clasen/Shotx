@@ -1,7 +1,7 @@
 import SxClient from '../client.js';
 import { readFileSync } from 'fs';
 
-const client = new SxClient();
+const client = new SxClient('http://localhost:3000', {}, { debug: 'debug' });
 
 client.connect();
 
