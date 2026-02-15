@@ -12,6 +12,7 @@ Shotx features built-in token-based authentication, asynchronous message handlin
 - **Custom Message Handlers**: Register specific handlers for different message types.
 - **Asynchronous Authentication**: Use async functions to validate tokens and authorize connections.
 - **Message Persistence**: Offline messages are queued and delivered when clients reconnect. In browser environments, messages are persisted using IndexedDB for durability across page reloads.
+- **Timeouts**: Configurable timeouts for connection and messages, with global defaults and per-call overrides.
 
 
 ## Usage
@@ -169,25 +170,26 @@ The `SxClient` class simplifies creating a client that connects to a Shotx serve
 
 **Constructor**
 ```javascript
-new SxClient(url, opts, { debug })
+new SxClient(url, opts, { debug, timeout })
 ```
 - `url` (optional): The server URL. Defaults to `http://localhost:3000`.
 - `opts` (optional): Socket.IO client options.
 - `debug` (optional): Log level for the client instance. Defaults to `'none'`. See [Logging](#logging).
+- `timeout` (optional): Default timeout in milliseconds for `connect()` and `send()` calls. `0` disables timeouts. Defaults to `0`.
 
 **Methods**
 
-- **connect(token?: string): Promise<any>**  
-  Connect to the server with the provided token. If no token is provided, generates a UUID. Returns a promise that resolves when authentication succeeds.
+- **connect(token?: string, opts?: { timeout?: number }): Promise<any>**  
+  Connect to the server with the provided token. If no token is provided, generates a UUID. Returns a promise that resolves when authentication succeeds. Rejects with `TIMEOUT` error if `timeout` ms elapse before auth succeeds.
 
 - **disconnect()**  
   Disconnects from the server and stops all communication.
 
-- **emit(eventName: string, data: any, meta?: object): Promise<any>**  
-  Sends a raw event to the server with optional metadata. If the client is offline, the message is queued and sent when reconnected.
+- **emit(eventName: string, data: any, meta?: object, opts?: { timeout?: number }): Promise<any>**  
+  Sends a raw event to the server with optional metadata. If the client is offline, the message is queued and sent when reconnected (timeout does not apply to queued messages).
 
-- **send(type: string, data: any): Promise<any>**  
-  A helper method that sends a message with the specified type. This is the primary method for sending typed messages.
+- **send(type: string, data: any, opts?: { timeout?: number }): Promise<any>**  
+  A helper method that sends a message with the specified type. This is the primary method for sending typed messages. Supports per-call timeout override.
 
 - **join(room: string): Promise<any>**  
   Join a specific room. The client will automatically rejoin this room if disconnected and reconnected.
@@ -203,6 +205,38 @@ new SxClient(url, opts, { debug })
 - Automatic rejoining of previously joined rooms
 - Automatic processing of queued offline messages
 - Persistent room membership across reconnections
+
+### Timeouts
+
+Timeouts prevent promises from hanging indefinitely when the server doesn't respond. Set a global default in the constructor or override per call.
+
+```javascript
+// Global default: all calls timeout after 10s
+const client = new SxClient('http://localhost:3000', {}, { timeout: 10000 });
+
+await client.connect('my-token');                        // uses 10s default
+await client.send('my_route', data);                     // uses 10s default
+await client.send('slow_route', data, { timeout: 30000 }); // override: 30s
+await client.send('critical', data, { timeout: 0 });    // no timeout for this call
+```
+
+**Behavior:**
+
+| Situation | What happens |
+|---|---|
+| Offline | Message is queued. Timeout does **not** apply. |
+| Online, response in time | Promise resolves with data. |
+| Online, no response in time | Promise rejects with `TIMEOUT` error. Message was already sent — it is **not** re-queued. |
+
+Timeout errors follow the format `TIMEOUT: <type> (<ms>ms)` for easy identification:
+
+```javascript
+try {
+    await client.send('slow_route', data, { timeout: 5000 });
+} catch (err) {
+    console.log(err.message); // "TIMEOUT: slow_route (5000ms)"
+}
+```
 
 ## Message Format
 

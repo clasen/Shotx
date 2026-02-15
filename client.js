@@ -3,9 +3,10 @@ import LemonLog from 'lemonlog';
 import { v7 as uuidv7 } from 'uuid';
 
 export default class SxClient {
-    constructor(url = 'http://localhost:3000', opts = {}, { debug = 'none' } = {}) {
+    constructor(url = 'http://localhost:3000', opts = {}, { debug = 'none', timeout = 0 } = {}) {
         this.url = url;
         this.log = new LemonLog("SxClient", debug);
+        this.timeout = timeout;
 
         const defaultOpts = {
             path: '/shotx/',
@@ -147,7 +148,7 @@ export default class SxClient {
     }
 
     // ============ Main send method ============
-    async emit(eventName, data, meta = {}) {
+    async emit(eventName, data, meta = {}, { timeout } = {}) {
         // Add UUID to meta
         meta.id = uuidv7();
 
@@ -168,17 +169,27 @@ export default class SxClient {
         }
 
         // Si está online, emitimos inmediatamente
-        return this._emitMessage(eventName, data, meta);
+        return this._emitMessage(eventName, data, meta, { timeout });
     }
 
     // ============ Internal method to emit a message ============
-    _emitMessage(eventName, data, meta = {}) {
+    _emitMessage(eventName, data, meta = {}, { timeout } = {}) {
+        const ms = timeout ?? this.timeout;
+
         return new Promise((resolve, reject) => {
             const message = { meta, data };
             this.log.info(`> emit: ${eventName}`, message);
 
+            let timer;
+            if (ms > 0) {
+                timer = setTimeout(() => {
+                    reject(new Error(`TIMEOUT: ${meta.type || eventName} (${ms}ms)`));
+                }, ms);
+            }
+
             // Emit event to server
             this.socket.emit(eventName, message, (response) => {
+                if (timer) clearTimeout(timer);
                 const { meta, data } = response;
 
                 if (!meta.success) {
@@ -278,15 +289,23 @@ export default class SxClient {
     }
 
     // Connect to the server with a token
-    async connect(token) {
+    async connect(token, { timeout } = {}) {
         if (this.isConnected) {
             return;
         }
 
         token = token ?? uuidv7();
+        const ms = timeout ?? this.timeout;
 
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             let retryCount = 0;
+            let timer;
+
+            if (ms > 0) {
+                timer = setTimeout(() => {
+                    reject(new Error(`TIMEOUT: connect (${ms}ms)`));
+                }, ms);
+            }
 
             const attemptConnection = () => {
                 if (this.socket) {
@@ -316,6 +335,7 @@ export default class SxClient {
                 });
 
                 this.socket.on('auth_success', async (data) => {
+                    if (timer) clearTimeout(timer);
                     this.log.info('> auth_success', data);
                     await this.processQueue();
                     await this.rejoinRooms();
@@ -336,9 +356,9 @@ export default class SxClient {
         }
     }
 
-    async send(type, data) {
+    async send(type, data, { timeout } = {}) {
         const meta = { type };
-        return this.emit(this.routeEvent, data, meta);
+        return this.emit(this.routeEvent, data, meta, { timeout });
     }
 
     async join(room) {
