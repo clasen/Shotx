@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.5.0",
+  "version": "1.5.2",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
@@ -31,7 +31,7 @@
     "url": "https://github.com/clasen/Shotx/issues"
   },
   "scripts": {
-    "test": "mocha test/shotx.test.js --timeout 10000"
+    "test": "node --test test/shotx.test.js"
   },
   "homepage": "https://github.com/clasen/Shotx#readme",
   "dependencies": {
@@ -40,8 +40,5 @@
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "uuid": "^11.0.5"
-  },
-  "devDependencies": {
-    "mocha": "^11.7.5"
   }
 }

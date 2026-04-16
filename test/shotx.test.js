@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import { describe, it, before, after } from 'node:test';
 import assert from 'assert';
 import { SxServer } from '../index.js';
 import SxClient from '../client.js';
