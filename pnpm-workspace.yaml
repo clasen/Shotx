@@ -1,0 +1,6 @@
+minimumReleaseAgeExclude:
+  - ws@8.20.1 || 8.21.0
+  - engine.io@6.6.7
+overrides:
+  ws@>=8.0.0 <8.20.1: ^8.20.1
+  ws@>=8.0.0 <8.21.0: ^8.21.0

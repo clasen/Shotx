@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
@@ -37,8 +37,9 @@
   "dependencies": {
     "deepbase": "^2.0.4",
     "lemonlog": "^1.2.2",
-    "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
     "uuid": "^14.0.0"
-  }
+  },
+  "packageManager": "pnpm@11.9.0"
 }
