@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shotx · prueba de reapertura</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            background: #10130f;
+            color: #f0f4e8;
+        }
+        body { max-width: 920px; margin: 0 auto; padding: 40px 24px 80px; }
+        h1 { margin-bottom: 8px; font-size: clamp(28px, 5vw, 52px); letter-spacing: -0.05em; }
+        p { color: #adb7a5; line-height: 1.55; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 28px 0; }
+        .card, .log { border: 1px solid #323a2e; background: #181d16; border-radius: 10px; padding: 18px; }
+        .label { color: #7f8c77; font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
+        .value { display: block; margin-top: 10px; font-size: 24px; overflow-wrap: anywhere; }
+        #result { margin: 24px 0; padding: 18px; border-radius: 10px; font-weight: 700; }
+        .waiting { background: #292819; color: #f6d76f; }
+        .pass { background: #163522; color: #8ff0ae; }
+        .fail { background: #3b1919; color: #ff9a9a; }
+        .log { min-height: 180px; max-height: 320px; overflow: auto; white-space: pre-wrap; line-height: 1.55; }
+        button { border: 1px solid #58654f; border-radius: 8px; padding: 10px 14px; color: inherit; background: transparent; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="label">Prueba browser → room de usuario</div>
+    <h1>¿Se perdió algún mensaje?</h1>
+    <p>
+        Dejá que lleguen algunos números, cerrá esta pestaña, esperá unos segundos y volvé a abrir
+        esta misma URL. El historial sobrevivirá en localStorage y Shotx deberá entregar lo acumulado.
+    </p>
+
+    <div class="grid">
+        <div class="card"><span class="label">Conexión</span><span id="connection" class="value">conectando…</span></div>
+        <div class="card"><span class="label">Aperturas</span><span id="loads" class="value">1</span></div>
+        <div class="card"><span class="label">Último número</span><span id="last" class="value">—</span></div>
+        <div class="card"><span class="label">Recibidos</span><span id="received" class="value">0</span></div>
+        <div class="card"><span class="label">Faltantes</span><span id="missing" class="value">—</span></div>
+        <div class="card"><span class="label">Duplicados</span><span id="duplicates" class="value">0</span></div>
+    </div>
+
+    <div id="result" class="waiting">ESPERANDO · recibí mensajes y reabrí la pestaña</div>
+    <div id="room" class="label">Room: —</div>
+    <pre id="log" class="log"></pre>
+    <button id="reset" type="button">Borrar medición local</button>
+
+    <script type="module">
+        import SxClient from '../client.js';
+
+        const storageKey = 'shotx-room-reconnect-test:v1';
+        const serverUrl = new URLSearchParams(location.search).get('server') || 'http://localhost:3000';
+        const elements = Object.fromEntries(
+            ['connection', 'loads', 'last', 'received', 'missing', 'duplicates', 'result', 'room', 'log']
+                .map((id) => [id, document.getElementById(id)])
+        );
+
+        function readState() {
+            try {
+                return JSON.parse(localStorage.getItem(storageKey)) || {};
+            } catch {
+                return {};
+            }
+        }
+
+        let state = readState();
+        state.pageLoads = (state.pageLoads || 0) + 1;
+        state.received = Array.isArray(state.received) ? state.received : [];
+        state.duplicates = state.duplicates || 0;
+        localStorage.setItem(storageKey, JSON.stringify(state));
+
+        function log(message) {
+            elements.log.textContent += `[${new Date().toLocaleTimeString()}] ${message}\n`;
+            elements.log.scrollTop = elements.log.scrollHeight;
+        }
+
+        function missingNumbers(numbers) {
+            if (numbers.length === 0) return [];
+            const seen = new Set(numbers);
+            const highest = Math.max(...numbers);
+            const missing = [];
+            for (let number = 1; number <= highest; number += 1) {
+                if (!seen.has(number)) missing.push(number);
+            }
+            return missing;
+        }
+
+        function render() {
+            const numbers = state.received;
+            const missing = missingNumbers(numbers);
+            const last = numbers.length ? Math.max(...numbers) : null;
+
+            elements.loads.textContent = String(state.pageLoads);
+            elements.last.textContent = last ?? '—';
+            elements.received.textContent = String(numbers.length);
+            elements.missing.textContent = missing.length ? missing.join(', ') : '—';
+            elements.duplicates.textContent = String(state.duplicates);
+            elements.room.textContent = `Room: ${state.room || '—'}`;
+
+            if (missing.length > 0) {
+                elements.result.className = 'fail';
+                elements.result.textContent = `FAIL · faltan ${missing.length}: ${missing.join(', ')}`;
+            } else if (state.pageLoads >= 2 && numbers.length > 0) {
+                elements.result.className = 'pass';
+                elements.result.textContent = `PASS · secuencia completa del 1 al ${last} después de reabrir`;
+            } else {
+                elements.result.className = 'waiting';
+                elements.result.textContent = 'ESPERANDO · recibí mensajes y reabrí la pestaña';
+            }
+        }
+
+        function recordMessage(data) {
+            if (state.runId !== data.runId) {
+                state = {
+                    runId: data.runId,
+                    room: data.room,
+                    pageLoads: 1,
+                    received: [],
+                    duplicates: 0
+                };
+                log(`Nueva ejecución ${data.runId}; medición reiniciada`);
+            }
+
+            if (state.received.includes(data.number)) {
+                state.duplicates += 1;
+                log(`Duplicado #${data.number}`);
+            } else {
+                state.received.push(data.number);
+                state.received.sort((a, b) => a - b);
+                log(`Recibido #${data.number}`);
+            }
+
+            localStorage.setItem(storageKey, JSON.stringify(state));
+            render();
+        }
+
+        document.getElementById('reset').addEventListener('click', () => {
+            localStorage.removeItem(storageKey);
+            location.reload();
+        });
+
+        render();
+
+        const client = new SxClient(serverUrl, {}, { debug: 'info', timeout: 5000 });
+
+        try {
+            const auth = await client.connect('browser-test-token');
+            elements.connection.textContent = 'conectado';
+            state.room = auth.room;
+            localStorage.setItem(storageKey, JSON.stringify(state));
+            render();
+
+            // This must happen before join(): queued room messages can be emitted during the join.
+            client.onMessage('numbered-message', recordMessage);
+            await client.join(auth.room);
+            log(`Conectado como ${auth.userId} y escuchando ${auth.room}`);
+
+            client.socket.on('disconnect', () => {
+                elements.connection.textContent = 'desconectado';
+                log('Desconectado');
+            });
+        } catch (error) {
+            elements.connection.textContent = 'error';
+            elements.result.className = 'fail';
+            elements.result.textContent = `ERROR · ${error.message}`;
+            log(error.stack || error.message);
+        }
+    </script>
+</body>
+</html>

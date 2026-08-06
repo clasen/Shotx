@@ -31,7 +31,9 @@
     "url": "https://github.com/clasen/Shotx/issues"
   },
   "scripts": {
-    "test": "node --test test/shotx.test.js"
+    "test": "node --test test/shotx.test.js",
+    "test:browser:server": "node demo/room-reconnect-server.js",
+    "test:browser:ui": "npm --prefix demo run dev -- --host 127.0.0.1"
   },
   "homepage": "https://github.com/clasen/Shotx#readme",
   "dependencies": {

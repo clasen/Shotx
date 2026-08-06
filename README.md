@@ -17,6 +17,19 @@ Shotx features built-in token-based authentication, asynchronous message handlin
 
 ## Usage
 
+### Browser close/reopen persistence test
+
+The repository includes a browser scenario that sends numbered messages to the authenticated user's room and checks that the sequence remains complete after the tab is closed and reopened.
+
+Run these commands in separate terminals:
+
+```bash
+npm run test:browser:server
+npm run test:browser:ui
+```
+
+Open `http://127.0.0.1:3001/room-reconnect.html`, wait for a few messages, close the tab, wait a few seconds, and open the same URL again. The page persists the received sequence in `localStorage` and reports `PASS` only when there are no gaps after reopening.
+
 ### Server Setup
 
 The server component creates a Socket.IO server and allows you to set up a custom authentication handler and message handlers.

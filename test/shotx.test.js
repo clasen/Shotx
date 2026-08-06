@@ -457,6 +457,49 @@ describe('Rooms', function () {
     });
 });
 
+describe('Room persistence across client recreation', function () {
+    let httpServer, sxServer, port;
+
+    before(async function () {
+        ({ httpServer, sxServer, port } = await createTestServer());
+    });
+
+    after(async function () {
+        await cleanup(httpServer);
+    });
+
+    it('should deliver every numbered message after closing and recreating a client', async function () {
+        const room = `reconnect-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const received = [];
+        let client = createTestClient(port);
+
+        await client.connect('token');
+        client.onMessage('numbered_message', ({ number }) => received.push(number));
+        await client.join(room);
+
+        sxServer.to(room).send('numbered_message', { number: 1 });
+        sxServer.to(room).send('numbered_message', { number: 2 });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        client.disconnect();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        sxServer.to(room).send('numbered_message', { number: 3 });
+        sxServer.to(room).send('numbered_message', { number: 4 });
+        sxServer.to(room).send('numbered_message', { number: 5 });
+
+        // Recreate the whole client, as a browser does after closing and reopening a tab.
+        client = createTestClient(port);
+        await client.connect('token');
+        client.onMessage('numbered_message', ({ number }) => received.push(number));
+        await client.join(room);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        assert.deepStrictEqual(received, [1, 2, 3, 4, 5]);
+        client.disconnect();
+    });
+});
+
 describe('Disconnect', function () {
     let httpServer, sxServer, port;
 
