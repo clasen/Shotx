@@ -37,7 +37,7 @@
   },
   "homepage": "https://github.com/clasen/Shotx#readme",
   "dependencies": {
-    "deepbase": "^2.0.4",
+    "deepbase": "^3.8.4",
     "lemonlog": "^1.2.2",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",

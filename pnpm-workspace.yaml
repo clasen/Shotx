@@ -1,6 +1,8 @@
 minimumReleaseAgeExclude:
   - ws@8.20.1 || 8.21.0
   - engine.io@6.6.7
+  - deepbase-json@3.8.4
+  - deepbase@3.8.4
 overrides:
   ws@>=8.0.0 <8.20.1: ^8.20.1
   ws@>=8.0.0 <8.21.0: ^8.21.0
