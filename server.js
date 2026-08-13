@@ -1,15 +1,41 @@
 import { Server } from 'socket.io';
 import LemonLog from 'lemonlog';
 import DeepBase from 'deepbase';
+import { v7 as uuidv7 } from 'uuid';
+
+const reliableStore = 'sxReliableRooms';
+
+function validateReliableConfig(reliable) {
+    if (!reliable || typeof reliable !== 'object') {
+        throw new Error('reliable must be an object');
+    }
+    if (typeof reliable.enabled !== 'boolean') {
+        throw new Error('reliable.enabled must be a boolean');
+    }
+    if (!reliable.enabled) return null;
+    if (!Number.isSafeInteger(reliable.retentionMs) || reliable.retentionMs <= 0) {
+        throw new Error('reliable.retentionMs must be a positive integer');
+    }
+    if (!Number.isSafeInteger(reliable.maxMessagesPerRoom) || reliable.maxMessagesPerRoom <= 0) {
+        throw new Error('reliable.maxMessagesPerRoom must be a positive integer');
+    }
+
+    return {
+        enabled: true,
+        retentionMs: reliable.retentionMs,
+        maxMessagesPerRoom: reliable.maxMessagesPerRoom
+    };
+}
 
 export default class SxServer {
 
-    constructor(server, opts = {}, { auto404 = true, debug = 'none' } = {}) {
+    constructor(server, opts = {}, { auto404 = true, debug = 'none', reliable } = {}) {
         if (!server) {
             throw new Error('HTTP(s) server must be provided');
         }
 
         this.log = new LemonLog("SxServer", debug);
+        this.reliable = reliable === undefined ? null : validateReliableConfig(reliable);
 
         const defaultOptions = {
             path: '/shotx/',
@@ -33,6 +59,7 @@ export default class SxServer {
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
         this.db = new DeepBase({ name: 'shotx' });
+        this.roomOperations = new Map();
 
         // Configurar middleware de autenticación
         this.io.use(async (socket, next) => {
@@ -104,15 +131,45 @@ export default class SxServer {
 
         // Listener for join room
         this.onMessage('sx_join', async (data, socket) => {
-            socket.join(data.room);
+            if (this.reliable) {
+                const replay = await this.replayReliableMessages(data.room, socket, {
+                    startSeq: Number.isSafeInteger(data.afterSeq) ? data.afterSeq + 1 : null,
+                    hasCursor: Number.isSafeInteger(data.afterSeq),
+                    joinSocket: true
+                });
+                if (replay.status === 'resync_required') {
+                    return { reliable: replay };
+                }
+                this.log.info(`<-- [${socket.id}] Joined reliable room: ${data.room}`);
+                return { reliable: replay };
+            }
+
+            await socket.join(data.room);
             this.log.info(`<-- [${socket.id}] Joined room: ${data.room}`);
-            this.processRoomMessages(data.room);
+            await this.processRoomMessages(data.room);
         });
 
         // Listener for leave room
         this.onMessage('sx_leave', async (data, socket) => {
-            socket.leave(data.room);
+            await socket.leave(data.room);
             this.log.info(`<-- [${socket.id}] Left room: ${data.room}`);
+        });
+
+        this.onMessage('sx_replay', async (data, socket) => {
+            if (!this.reliable) {
+                throw new Error('Reliable room delivery is not configured');
+            }
+            if (!data || typeof data.room !== 'string' || !Number.isSafeInteger(data.fromSeq) || data.fromSeq < 1) {
+                throw new Error('Invalid reliable replay request');
+            }
+            if (!socket.rooms.has(data.room)) {
+                throw new Error(`Socket is not joined to room: ${data.room}`);
+            }
+
+            return this.replayReliableMessages(data.room, socket, {
+                startSeq: data.fromSeq,
+                hasCursor: true
+            });
         });
     }
 
@@ -138,7 +195,7 @@ export default class SxServer {
                 return callback({ meta: { success: false, code: 2003, error: `Unknown message type: ${meta.type}` }, data: null });
             }
 
-            const result = await handler(data, socket);
+            const result = await handler(data, socket, meta);
             callback({ meta: { success: true }, data: result });
         } catch (error) {
             this.log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
@@ -149,6 +206,10 @@ export default class SxServer {
     to(room) {
         const roomSender = {
             send: (type, data) => {
+                if (this.reliable) {
+                    return this._sendReliableRoomMessage(room, type, data);
+                }
+
                 const message = {
                     meta: { type },
                     data
@@ -172,6 +233,138 @@ export default class SxServer {
         return roomSender;
     }
 
+    _sendReliableRoomMessage(room, type, data) {
+        if (typeof room !== 'string' || typeof type !== 'string') {
+            return Promise.reject(new Error('Reliable room and message type must be strings'));
+        }
+
+        return this.runRoomOperation(room, async () => {
+            const state = await this.loadReliableState(room);
+            const now = Date.now();
+            this.pruneReliableState(state, now);
+
+            const message = {
+                meta: {
+                    type,
+                    id: uuidv7(),
+                    stream: room,
+                    seq: state.nextSeq
+                },
+                data,
+                storedAt: now
+            };
+
+            state.nextSeq += 1;
+            state.messages.push(message);
+            this.pruneReliableState(state, now);
+            await this.db.set(reliableStore, room, state);
+
+            const envelope = this.toReliableEnvelope(message);
+            this.io.to(room).emit('message', envelope);
+            this.log.info(`--> [room:${room}] Sent reliable message: ${type}`, envelope);
+
+            return { id: message.meta.id, seq: message.meta.seq };
+        });
+    }
+
+    runRoomOperation(room, operation) {
+        const previous = this.roomOperations.get(room) || Promise.resolve();
+        const current = previous.catch(() => {}).then(operation);
+        this.roomOperations.set(room, current);
+
+        const cleanup = () => {
+            if (this.roomOperations.get(room) === current) {
+                this.roomOperations.delete(room);
+            }
+        };
+        current.then(cleanup, cleanup);
+        return current;
+    }
+
+    async loadReliableState(room) {
+        const stored = await this.db.get(reliableStore, room);
+        if (stored === null) {
+            return { nextSeq: 1, messages: [] };
+        }
+        if (!Number.isSafeInteger(stored.nextSeq) || stored.nextSeq < 1 || !Array.isArray(stored.messages)) {
+            throw new Error(`Corrupt reliable room state: ${room}`);
+        }
+        for (let index = 0; index < stored.messages.length; index += 1) {
+            const message = stored.messages[index];
+            const previous = stored.messages[index - 1];
+            if (!Number.isSafeInteger(message?.meta?.seq)
+                || message.meta.seq < 1
+                || !Number.isSafeInteger(message.storedAt)
+                || message.storedAt < 0
+                || (previous && message.meta.seq !== previous.meta.seq + 1)) {
+                throw new Error(`Corrupt reliable room log: ${room}`);
+            }
+        }
+        if (stored.messages.at(-1)?.meta?.seq >= stored.nextSeq) {
+            throw new Error(`Corrupt reliable room sequence: ${room}`);
+        }
+        return stored;
+    }
+
+    pruneReliableState(state, now) {
+        const cutoff = now - this.reliable.retentionMs;
+        state.messages = state.messages
+            .filter((message) => message.storedAt >= cutoff)
+            .slice(-this.reliable.maxMessagesPerRoom);
+    }
+
+    toReliableEnvelope(message) {
+        return {
+            meta: { ...message.meta },
+            data: message.data
+        };
+    }
+
+    replayReliableMessages(room, socket, { startSeq, hasCursor, joinSocket = false }) {
+        return this.runRoomOperation(room, async () => {
+            const state = await this.loadReliableState(room);
+            const originalLength = state.messages.length;
+            this.pruneReliableState(state, Date.now());
+            if (state.messages.length !== originalLength) {
+                await this.db.set(reliableStore, room, state);
+            }
+
+            const latestSeq = state.nextSeq - 1;
+            const earliestSeq = state.messages[0]?.meta?.seq ?? state.nextSeq;
+            const requestedSeq = startSeq ?? earliestSeq;
+
+            if (hasCursor && requestedSeq < earliestSeq && requestedSeq <= latestSeq) {
+                return {
+                    status: 'resync_required',
+                    reason: 'cursor_expired',
+                    earliestSeq,
+                    latestSeq
+                };
+            }
+            if (hasCursor && requestedSeq > latestSeq + 1) {
+                return {
+                    status: 'resync_required',
+                    reason: 'cursor_ahead',
+                    earliestSeq,
+                    latestSeq
+                };
+            }
+
+            if (joinSocket) {
+                await socket.join(room);
+            }
+
+            let replayed = 0;
+            for (const message of state.messages) {
+                if (message.meta.seq < requestedSeq) continue;
+                socket.emit('message', this.toReliableEnvelope(message));
+                replayed += 1;
+            }
+
+            return { status: 'ok', replayed, earliestSeq, latestSeq };
+        });
+    }
+
     async processRoomMessages(room) {
         try {
             const pendingMessages = await this.db.values(room) || [];
@@ -192,7 +385,7 @@ export default class SxServer {
                 }
 
                 // Clear processed messages
-                this.db.del(room);
+                await this.db.del(room);
             }
         } catch (error) {
             this.log.error(`Error processing room messages for ${room}:`, error);

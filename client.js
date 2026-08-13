@@ -2,11 +2,23 @@ import { io } from 'socket.io-client';
 import LemonLog from 'lemonlog';
 import { v7 as uuidv7 } from 'uuid';
 
+function validateReliableConfig(reliable) {
+    if (!reliable || typeof reliable !== 'object') {
+        throw new Error('reliable must be an object');
+    }
+    if (reliable.id !== undefined && (typeof reliable.id !== 'string' || reliable.id.length === 0)) {
+        throw new Error('reliable.id must be a non-empty string');
+    }
+
+    return { id: reliable.id ?? null };
+}
+
 export default class SxClient {
-    constructor(url = 'http://localhost:3000', opts = {}, { debug = 'none', timeout = 0 } = {}) {
+    constructor(url = 'http://localhost:3000', opts = {}, { debug = 'none', timeout = 0, reliable } = {}) {
         this.url = url;
         this.log = new LemonLog("SxClient", debug);
         this.timeout = timeout;
+        this.reliable = reliable === undefined ? { id: null } : validateReliableConfig(reliable);
 
         const defaultOpts = {
             path: '/shotx/',
@@ -23,6 +35,7 @@ export default class SxClient {
         this.offlineQueue = [];
         this.joinedRooms = new Set(); // Track joined rooms for reconnection
         this.messageHandlers = new Map(); // Track message handlers
+        this.reliableRooms = new Map();
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -30,14 +43,15 @@ export default class SxClient {
         // IndexedDB support
         this.db = null;
         this.dbName = 'ShotxOfflineQueue';
-        this.dbVersion = 1;
+        this.dbVersion = 3;
         this.storeName = 'messages';
+        this.cursorStoreName = 'reliableCursors';
+        this.metadataStoreName = 'reliableMetadata';
         this.useIndexedDB = this._checkIndexedDBSupport();
 
         // Initialize IndexedDB if available
-        if (this.useIndexedDB) {
-            this._initIndexedDB();
-        }
+        this.dbReady = this.useIndexedDB ? this._initIndexedDB() : Promise.resolve();
+        this.reliableIdPromise = this._resolveReliableId();
     }
 
     // ============ IndexedDB Methods ============
@@ -60,6 +74,12 @@ export default class SxClient {
                     if (!db.objectStoreNames.contains(this.storeName)) {
                         const store = db.createObjectStore(this.storeName, { keyPath: 'id', autoIncrement: true });
                         store.createIndex('timestamp', 'timestamp', { unique: false });
+                    }
+                    if (!db.objectStoreNames.contains(this.cursorStoreName)) {
+                        db.createObjectStore(this.cursorStoreName, { keyPath: 'key' });
+                    }
+                    if (!db.objectStoreNames.contains(this.metadataStoreName)) {
+                        db.createObjectStore(this.metadataStoreName, { keyPath: 'key' });
                     }
                 };
             });
@@ -144,6 +164,88 @@ export default class SxClient {
             });
         } catch (error) {
             this.log.warn('> Failed to clear persisted messages:', error.message);
+        }
+    }
+
+    _reliableIdentityKey() {
+        return `identity\u0000${this.url}`;
+    }
+
+    async _resolveReliableId() {
+        if (this.reliable.id) return this.reliable.id;
+
+        await this.dbReady;
+        const generatedId = uuidv7();
+        if (!this.useIndexedDB || !this.db) return generatedId;
+
+        try {
+            const transaction = this.db.transaction([this.metadataStoreName], 'readwrite');
+            const store = transaction.objectStore(this.metadataStoreName);
+            return await new Promise((resolve, reject) => {
+                const key = this._reliableIdentityKey();
+                const request = store.get(key);
+                request.onsuccess = () => {
+                    if (typeof request.result?.id === 'string' && request.result.id.length > 0) {
+                        resolve(request.result.id);
+                        return;
+                    }
+                    const putRequest = store.put({ key, id: generatedId });
+                    putRequest.onsuccess = () => resolve(generatedId);
+                    putRequest.onerror = () => reject(putRequest.error);
+                };
+                request.onerror = () => reject(request.error);
+            });
+        } catch (error) {
+            this.log.warn('> Failed to persist reliable client ID:', error.message);
+            return generatedId;
+        }
+    }
+
+    _reliableCursorKey(room, reliableId) {
+        return `${this.url}\u0000${reliableId}\u0000${room}`;
+    }
+
+    async _loadReliableCursor(room) {
+        await this.dbReady;
+        if (!this.useIndexedDB || !this.db) return null;
+
+        try {
+            const reliableId = await this.reliableIdPromise;
+            const transaction = this.db.transaction([this.cursorStoreName], 'readonly');
+            const store = transaction.objectStore(this.cursorStoreName);
+            const record = await new Promise((resolve, reject) => {
+                const request = store.get(this._reliableCursorKey(room, reliableId));
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+            return Number.isSafeInteger(record?.seq) && record.seq >= 0 ? record.seq : null;
+        } catch (error) {
+            this.log.warn('> Failed to load reliable cursor:', error.message);
+            return null;
+        }
+    }
+
+    async _saveReliableCursor(room, seq, { replace = false } = {}) {
+        await this.dbReady;
+        if (!this.useIndexedDB || !this.db) return;
+
+        try {
+            const reliableId = await this.reliableIdPromise;
+            const transaction = this.db.transaction([this.cursorStoreName], 'readwrite');
+            const store = transaction.objectStore(this.cursorStoreName);
+            await new Promise((resolve, reject) => {
+                const key = this._reliableCursorKey(room, reliableId);
+                const request = store.get(key);
+                request.onsuccess = () => {
+                    const savedSeq = Number.isSafeInteger(request.result?.seq) ? request.result.seq : -1;
+                    const putRequest = store.put({ key, seq: replace ? seq : Math.max(savedSeq, seq) });
+                    putRequest.onsuccess = () => resolve();
+                    putRequest.onerror = () => reject(putRequest.error);
+                };
+                request.onerror = () => reject(request.error);
+            });
+        } catch (error) {
+            this.log.warn('> Failed to save reliable cursor:', error.message);
         }
     }
 
@@ -258,7 +360,156 @@ export default class SxClient {
 
     // Internal method to join room without tracking
     async _joinRoom(room) {
-        return this.send('sx_join', { room });
+        const data = { room };
+        const state = await this._prepareReliableRoom(room);
+        if (state.lastSeq !== null) {
+            data.afterSeq = state.lastSeq;
+        }
+
+        const result = await this.send('sx_join', data);
+        if (result?.reliable?.status === 'resync_required') {
+            throw this._createResyncError(room, result.reliable);
+        }
+        return result;
+    }
+
+    async _prepareReliableRoom(room, afterSeq) {
+        if (afterSeq !== undefined && (!Number.isSafeInteger(afterSeq) || afterSeq < 0)) {
+            throw new Error('afterSeq must be a non-negative integer');
+        }
+
+        let state = this.reliableRooms.get(room);
+        if (!state || afterSeq !== undefined) {
+            const cursor = afterSeq ?? await this._loadReliableCursor(room);
+            state = {
+                room,
+                lastSeq: cursor,
+                buffer: new Map(),
+                processing: Promise.resolve(),
+                replayPromise: null,
+                lastReplayFrom: null,
+                resyncRequired: null
+            };
+            this.reliableRooms.set(room, state);
+        }
+        return state;
+    }
+
+    _createResyncError(room, details) {
+        const error = new Error(`Reliable room requires resynchronization: ${room}`);
+        error.code = 'RELIABLE_RESYNC_REQUIRED';
+        error.room = room;
+        error.details = details;
+        return error;
+    }
+
+    _handleReliableMessage(message) {
+        const { id, stream, seq } = message.meta;
+        if (typeof id !== 'string' || typeof stream !== 'string' || !Number.isSafeInteger(seq) || seq < 1) {
+            this.log.warn('> Received invalid reliable message envelope');
+            return;
+        }
+
+        let state = this.reliableRooms.get(stream);
+        if (!state) {
+            state = {
+                room: stream,
+                lastSeq: null,
+                buffer: new Map(),
+                processing: Promise.resolve(),
+                replayPromise: null,
+                lastReplayFrom: null,
+                resyncRequired: null
+            };
+            this.reliableRooms.set(stream, state);
+        }
+
+        if (state.lastSeq !== null && seq <= state.lastSeq) return;
+        if (state.buffer.has(seq)) {
+            this._scheduleReliableDrain(state);
+            return;
+        }
+
+        if (state.lastSeq === null) {
+            state.lastSeq = seq - 1;
+        }
+        state.buffer.set(seq, message);
+
+        if (seq > state.lastSeq + 1) {
+            this._requestReliableReplay(state, state.lastSeq + 1);
+        }
+
+        this._scheduleReliableDrain(state);
+    }
+
+    _scheduleReliableDrain(state) {
+        state.processing = state.processing
+            .then(() => this._drainReliableRoom(state))
+            .catch((error) => {
+                this.log.error(`> Reliable room processing failed for ${state.room}:`, error);
+            });
+    }
+
+    async _drainReliableRoom(state) {
+        while (state.buffer.has(state.lastSeq + 1)) {
+            const seq = state.lastSeq + 1;
+            const message = state.buffer.get(seq);
+            const handler = this.messageHandlers.get(message.meta.type);
+            if (!handler) {
+                this.log.warn(`> No handler for reliable route: ${message.meta.type}`);
+                return;
+            }
+
+            try {
+                await handler(message.data, this.socket, message.meta);
+            } catch (error) {
+                this.log.error(`> Error in reliable handler for route ${message.meta.type}:`, error);
+                return;
+            }
+
+            state.buffer.delete(seq);
+            state.lastSeq = seq;
+            if (state.lastReplayFrom !== null && state.lastSeq >= state.lastReplayFrom) {
+                state.lastReplayFrom = null;
+            }
+            await this._saveReliableCursor(state.room, seq);
+        }
+
+        const bufferedSeqs = [...state.buffer.keys()];
+        if (bufferedSeqs.length > 0) {
+            const firstBuffered = Math.min(...bufferedSeqs);
+            if (firstBuffered > state.lastSeq + 1) {
+                this._requestReliableReplay(state, state.lastSeq + 1);
+            }
+        }
+    }
+
+    _requestReliableReplay(state, fromSeq) {
+        if (!this.isConnected || state.replayPromise || state.lastReplayFrom === fromSeq || state.resyncRequired) {
+            return;
+        }
+
+        state.lastReplayFrom = fromSeq;
+        state.replayPromise = this.send('sx_replay', { room: state.room, fromSeq })
+            .then(async (result) => {
+                if (result?.status !== 'resync_required') return;
+                state.resyncRequired = result;
+                const error = this._createResyncError(state.room, result);
+                this.log.error(`> ${error.message}`, result);
+                await this.send('sx_leave', { room: state.room });
+                this.joinedRooms.delete(state.room);
+                const handler = this.messageHandlers.get('sx_resync_required');
+                if (handler) {
+                    await handler({ room: state.room, ...result }, this.socket);
+                }
+            })
+            .catch((error) => {
+                state.lastReplayFrom = null;
+                this.log.error(`> Failed to replay reliable room ${state.room}:`, error);
+            })
+            .finally(() => {
+                state.replayPromise = null;
+            });
     }
 
     // Setup centralized message routing
@@ -275,12 +526,17 @@ export default class SxClient {
                 return;
             }
 
+            if (message.meta.seq !== undefined || message.meta.stream !== undefined) {
+                this._handleReliableMessage(message);
+                return;
+            }
+
             const { type } = message.meta;
             const handler = this.messageHandlers.get(type);
 
             if (handler) {
                 try {
-                    await handler(message.data, this.socket);
+                    await handler(message.data, this.socket, message.meta);
                 } catch (error) {
                     this.log.error(`> Error in message handler for route ${type}:`, error);
                 }
@@ -361,8 +617,12 @@ export default class SxClient {
         return this.emit(this.routeEvent, data, meta, { timeout });
     }
 
-    async join(room) {
+    async join(room, { afterSeq } = {}) {
+        await this._prepareReliableRoom(room, afterSeq);
         const result = await this._joinRoom(room);
+        if (afterSeq !== undefined) {
+            await this._saveReliableCursor(room, this.reliableRooms.get(room).lastSeq, { replace: true });
+        }
         this.joinedRooms.add(room); // Track joined room
         this.log.info(`> Joined room: ${room}`);
         return result;
@@ -371,6 +631,7 @@ export default class SxClient {
     async leave(room) {
         const result = await this.send('sx_leave', { room });
         this.joinedRooms.delete(room); // Remove from tracked rooms
+        this.reliableRooms.delete(room);
         this.log.info(`> Left room: ${room}`);
         return result;
     }
@@ -383,5 +644,9 @@ export default class SxClient {
 
         this.messageHandlers.set(route, handler);
         this.log.info(`> Registered message handler for route: ${route}`);
+
+        for (const state of this.reliableRooms.values()) {
+            this._scheduleReliableDrain(state);
+        }
     }
-} 
+}
