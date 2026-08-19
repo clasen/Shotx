@@ -45,28 +45,6 @@ async function waitFor(predicate, timeoutMs = 2000) {
     }
 }
 
-function dropNextRoomMessage(sxServer, predicate) {
-    const adapter = sxServer.io.sockets.adapter;
-    const originalBroadcast = adapter.broadcast;
-    let dropped = false;
-
-    adapter.broadcast = function (packet, opts) {
-        const message = packet?.data?.[0] === 'message' ? packet.data[1] : null;
-        if (!dropped && message && predicate(message)) {
-            dropped = true;
-            return;
-        }
-        return originalBroadcast.call(this, packet, opts);
-    };
-
-    return {
-        wasDropped: () => dropped,
-        restore: () => {
-            adapter.broadcast = originalBroadcast;
-        }
-    };
-}
-
 // ============ Tests ============
 
 describe('SxServer', function () {
@@ -80,6 +58,7 @@ describe('SxServer', function () {
             const { httpServer, sxServer } = await createTestServer();
             assert.ok(sxServer.io);
             assert.ok(sxServer.messageHandlers instanceof Map);
+            assert.strictEqual(sxServer.reliable.enabled, false);
             await cleanup(httpServer);
         });
     });
@@ -131,6 +110,7 @@ describe('SxClient', function () {
             assert.strictEqual(client.url, 'http://localhost:3000');
             assert.strictEqual(client.timeout, 0);
             assert.strictEqual(client.isConnected, false);
+            assert.strictEqual(client.reliable.enabled, false);
             assert.ok(Array.isArray(client.offlineQueue));
             assert.strictEqual(client.offlineQueue.length, 0);
         });
@@ -532,85 +512,354 @@ describe('Room persistence across client recreation', function () {
     });
 });
 
-describe('Reliable room delivery', function () {
+describe('Reliable delivery', function () {
     const reliable = {
         enabled: true,
         retentionMs: 60_000,
-        maxMessagesPerRoom: 100
+        maxMessagesPerRoom: 100,
+        identity: () => 'test-principal'
     };
 
     const createReliableClient = (port, id) => createTestClient(
         port,
         {},
-        id === undefined ? {} : { reliable: { id } }
+        { reliable: id === undefined ? { enabled: true } : { enabled: true, id } }
     );
 
-    it('loses a message when the normal transport drops one packet', async function () {
-        const { httpServer, sxServer, port } = await createTestServer();
-        const room = `normal-packet-loss-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    async function runImmediateDisconnectStress(sxServer, client, room) {
         const received = [];
-        const client = createTestClient(port);
+        const deliveredWhileConnected = [1];
+        const disconnectCycles = 5;
+        const messagesPerDisconnect = 20;
+        let nextNumber = 1;
 
         await client.connect('token');
         client.onMessage('numbered', ({ number }) => received.push(number));
         await client.join(room);
+        await sxServer.to(room).send('numbered', { number: nextNumber });
+        await waitFor(() => received.at(-1) === nextNumber);
 
-        sxServer.to(room).send('numbered', { number: 1 });
-        await waitFor(() => received.length === 1);
+        for (let cycle = 0; cycle < disconnectCycles; cycle += 1) {
+            client.disconnect();
 
-        const packetLoss = dropNextRoomMessage(
-            sxServer,
-            (message) => message.meta.type === 'numbered' && message.data.number === 2
-        );
-        sxServer.to(room).send('numbered', { number: 2 });
-        sxServer.to(room).send('numbered', { number: 3 });
-        packetLoss.restore();
+            const staleRoom = sxServer.io.sockets.adapter.rooms.get(room);
+            assert.strictEqual(staleRoom?.size, 1);
 
-        await waitFor(() => received.length === 2);
-        assert.strictEqual(packetLoss.wasDropped(), true);
-        assert.deepStrictEqual(received, [1, 3]);
+            const sends = [];
+            for (let index = 0; index < messagesPerDisconnect; index += 1) {
+                nextNumber += 1;
+                sends.push(sxServer.to(room).send('numbered', { number: nextNumber }));
+            }
+            await Promise.all(sends);
+            await waitFor(() => !sxServer.io.sockets.adapter.rooms.has(room));
+
+            await client.connect('token');
+            nextNumber += 1;
+            deliveredWhileConnected.push(nextNumber);
+            await sxServer.to(room).send('numbered', { number: nextNumber });
+            await waitFor(() => received.at(-1) === nextNumber, 5000);
+        }
+
+        return { received, deliveredWhileConnected, lastNumber: nextNumber };
+    }
+
+    async function runClientToServerDisconnectStress(sxServer, client, { expectReliable }) {
+        const handled = [];
+        const deliveredWhileConnected = [1];
+        const disconnectCycles = 5;
+        const messagesPerDisconnect = 20;
+        let nextNumber = 1;
+
+        sxServer.onMessage('client-numbered', ({ number }) => {
+            handled.push(number);
+            return number;
+        });
+        await client.connect('token');
+        await client.send('client-numbered', { number: nextNumber });
+
+        for (let cycle = 0; cycle < disconnectCycles; cycle += 1) {
+            const serverSocket = [...sxServer.io.sockets.sockets.values()][0];
+            serverSocket.conn.close();
+            assert.strictEqual(client.isConnected, true);
+
+            const deliveries = [];
+            for (let index = 0; index < messagesPerDisconnect; index += 1) {
+                nextNumber += 1;
+                deliveries.push(client.send('client-numbered', { number: nextNumber }));
+            }
+            await waitFor(() => !client.isConnected);
+            await client.connect('token');
+            if (expectReliable) {
+                await Promise.all(deliveries);
+            }
+
+            nextNumber += 1;
+            deliveredWhileConnected.push(nextNumber);
+            await client.send('client-numbered', { number: nextNumber });
+            await waitFor(() => handled.at(-1) === nextNumber, 5000);
+        }
+
+        return { handled, deliveredWhileConnected, lastNumber: nextNumber };
+    }
+
+    it('loses messages during repeated immediate disconnect races without reliable mode', async function () {
+        const { httpServer, sxServer, port } = await createTestServer();
+        const room = `normal-disconnect-stress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const client = createTestClient(port);
+
+        const result = await runImmediateDisconnectStress(sxServer, client, room);
+        assert.deepStrictEqual(result.received, result.deliveredWhileConnected);
+        assert.ok(result.received.length < result.lastNumber);
 
         await cleanup(httpServer, client);
     });
 
-    it('recovers the same dropped packet when reliable mode is enabled', async function () {
+    it('replays every message in order during the same disconnect stress with reliable mode', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, { reliable });
-        const room = `reliable-packet-loss-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const received = [];
-        const client = createReliableClient(port, 'packet-loss-client');
+        const room = `reliable-disconnect-stress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const client = createReliableClient(port, 'disconnect-stress-client');
 
-        await client.connect('token');
-        client.onMessage('numbered', ({ number }) => received.push(number));
-        await client.join(room);
-
-        await sxServer.to(room).send('numbered', { number: 1 });
-        await waitFor(() => received.length === 1);
-
-        const packetLoss = dropNextRoomMessage(
-            sxServer,
-            (message) => message.meta.type === 'numbered' && message.data.number === 2
+        const result = await runImmediateDisconnectStress(sxServer, client, room);
+        assert.deepStrictEqual(
+            result.received,
+            Array.from({ length: result.lastNumber }, (_, index) => index + 1)
         );
-        await sxServer.to(room).send('numbered', { number: 2 });
-        await sxServer.to(room).send('numbered', { number: 3 });
-        packetLoss.restore();
-
-        await waitFor(() => received.length === 3);
-        assert.strictEqual(packetLoss.wasDropped(), true);
-        assert.deepStrictEqual(received, [1, 2, 3]);
 
         await sxServer.db.del('sxReliableRooms', room);
         await cleanup(httpServer, client);
     });
 
-    it('requires explicit retention configuration', async function () {
-        const httpServer = createServer();
+    it('loses client messages when the server transport closes at the wrong moment without reliable mode', async function () {
+        const { httpServer, sxServer, port } = await createTestServer();
+        const client = createTestClient(port);
+
+        const result = await runClientToServerDisconnectStress(sxServer, client, { expectReliable: false });
+        assert.ok(result.deliveredWhileConnected.every((number) => result.handled.includes(number)));
+        assert.ok(result.handled.length < result.lastNumber);
+
+        await cleanup(httpServer, client);
+    });
+
+    it('replays every client message in order after the same server disconnect stress with reliable mode', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, { reliable });
+        const clientId = 'client-disconnect-stress';
+        const client = createReliableClient(port, clientId);
+
+        const result = await runClientToServerDisconnectStress(sxServer, client, { expectReliable: true });
+        assert.deepStrictEqual(
+            result.handled,
+            Array.from({ length: result.lastNumber }, (_, index) => index + 1)
+        );
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['test-principal', clientId]));
+        await cleanup(httpServer, client);
+    });
+
+    it('enables reliable delivery only from server to client', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, {
+            reliable: { enabled: true }
+        });
+        const room = `server-to-client-only-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const client = createTestClient(port);
+
+        const roomResult = await runImmediateDisconnectStress(sxServer, client, room);
+        assert.deepStrictEqual(
+            roomResult.received,
+            Array.from({ length: roomResult.lastNumber }, (_, index) => index + 1)
+        );
+
+        const clientResult = await runClientToServerDisconnectStress(sxServer, client, { expectReliable: false });
+        assert.ok(clientResult.deliveredWhileConnected.every((number) => clientResult.handled.includes(number)));
+        assert.ok(clientResult.handled.length < clientResult.lastNumber);
+
+        await sxServer.db.del('sxReliableRooms', room);
+        await cleanup(httpServer, client);
+    });
+
+    it('enables reliable delivery only from client to server', async function () {
+        const { httpServer, sxServer, port } = await createTestServer();
+        const clientId = 'client-to-server-only';
+        const client = createReliableClient(port, clientId);
+
+        const clientResult = await runClientToServerDisconnectStress(sxServer, client, { expectReliable: true });
+        assert.deepStrictEqual(
+            clientResult.handled,
+            Array.from({ length: clientResult.lastNumber }, (_, index) => index + 1)
+        );
+
+        const room = `client-to-server-only-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const roomResult = await runImmediateDisconnectStress(sxServer, client, room);
+        assert.deepStrictEqual(roomResult.received, roomResult.deliveredWhileConnected);
+        assert.ok(roomResult.received.length < roomResult.lastNumber);
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify([null, clientId]));
+        await cleanup(httpServer, client);
+    });
+
+    it('deduplicates a client message when the server processes it but the acknowledgement is lost', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, { reliable });
+        const clientId = 'lost-ack-client';
+        const client = createReliableClient(port, clientId);
+        let executions = 0;
+
+        sxServer.onMessage('commit-once', ({ value }, socket) => {
+            executions += 1;
+            if (executions === 1) {
+                socket.conn.close();
+            }
+            return { value, executions };
+        });
+        await client.connect('token');
+
+        const delivery = client.send('commit-once', { value: 'saved' });
+        await waitFor(() => executions === 1 && !client.isConnected);
+        await client.connect('token');
+
+        assert.deepStrictEqual(await delivery, { value: 'saved', executions: 1 });
+        assert.strictEqual(executions, 1);
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['test-principal', clientId]));
+        await cleanup(httpServer, client);
+    });
+
+    it('acknowledges a handler error once and continues with the next client sequence', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, { reliable });
+        const clientId = 'handler-error-client';
+        const client = createReliableClient(port, clientId);
+        let executions = 0;
+
+        sxServer.onMessage('failing-command', () => {
+            executions += 1;
+            throw new Error('command failed');
+        });
+        sxServer.onMessage('next-command', (data, socket, meta) => meta.seq);
+        await client.connect('token');
+
+        await assert.rejects(() => client.send('failing-command', {}), /command failed/);
+        assert.strictEqual(executions, 1);
+        assert.strictEqual(await client.send('next-command', {}), 2);
+        assert.strictEqual(client.reliableOutbox.size, 0);
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['test-principal', clientId]));
+        await cleanup(httpServer, client);
+    });
+
+    it('continues the client sequence after restarting the server', async function () {
+        const firstServer = await createTestServer({}, { reliable });
+        const clientId = 'client-server-restart';
+        const client = createReliableClient(firstServer.port, clientId);
+        const sequences = [];
+
+        firstServer.sxServer.onMessage('client-restart', (data, socket, meta) => {
+            sequences.push(meta.seq);
+        });
+        await client.connect('token');
+        await client.send('client-restart', { number: 1 });
+        await new Promise((resolve) => firstServer.sxServer.io.close(resolve));
+        await waitFor(() => !client.isConnected);
+
+        const secondHttpServer = createServer();
+        const secondSxServer = new SxServer(secondHttpServer, {}, { debug: 'none', reliable });
+        secondSxServer.onMessage('client-restart', (data, socket, meta) => {
+            sequences.push(meta.seq);
+        });
+        await new Promise((resolve) => secondHttpServer.listen(firstServer.port, resolve));
+
+        await client.connect('token');
+        await client.send('client-restart', { number: 2 });
+        assert.deepStrictEqual(sequences, [1, 2]);
+
+        await secondSxServer.db.del('sxReliableClients', JSON.stringify(['test-principal', clientId]));
+        await cleanup(secondHttpServer, client);
+    });
+
+    it('continues the server sequence after recreating a client with the same ID', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, { reliable });
+        const clientId = 'recreated-client';
+        const sequences = [];
+        let client = createReliableClient(port, clientId);
+
+        sxServer.onMessage('recreated-client-message', (data, socket, meta) => {
+            sequences.push(meta.seq);
+        });
+        await client.connect('token');
+        await client.send('recreated-client-message', { number: 1 });
+        client.disconnect();
+        await waitFor(() => sxServer.io.sockets.sockets.size === 0);
+
+        client = createReliableClient(port, clientId);
+        await client.connect('token');
+        await client.send('recreated-client-message', { number: 2 });
+        assert.deepStrictEqual(sequences, [1, 2]);
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['test-principal', clientId]));
+        await cleanup(httpServer, client);
+    });
+
+    it('scopes identical client IDs by authenticated identity', async function () {
+        const scopedReliable = { ...reliable, identity: (auth) => auth.userId };
+        const { httpServer, sxServer, port } = await createTestServer({}, { reliable: scopedReliable });
+        sxServer.setAuthHandler((token) => ({ userId: token }));
+        const firstClient = createReliableClient(port, 'shared-device');
+        const secondClient = createReliableClient(port, 'shared-device');
+        const seen = [];
+
+        sxServer.onMessage('scoped', ({ owner }, socket, meta) => {
+            seen.push({ owner, userId: socket.auth.userId, seq: meta.seq });
+        });
+        await firstClient.connect('first-user');
+        await secondClient.connect('second-user');
+        await firstClient.send('scoped', { owner: 'first' });
+        await secondClient.send('scoped', { owner: 'second' });
+
+        assert.deepStrictEqual(seen, [
+            { owner: 'first', userId: 'first-user', seq: 1 },
+            { owner: 'second', userId: 'second-user', seq: 1 }
+        ]);
+
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['first-user', 'shared-device']));
+        await sxServer.db.del('sxReliableClients', JSON.stringify(['second-user', 'shared-device']));
+        firstClient.disconnect();
+        secondClient.disconnect();
+        await cleanup(httpServer);
+    });
+
+    it('uses reliable defaults and validates explicit overrides', async function () {
+        const { httpServer, sxServer } = await createTestServer({}, {
+            reliable: { enabled: true }
+        });
+        const invalidHttpServer = createServer();
+
+        assert.deepStrictEqual(sxServer.reliable, {
+            enabled: true,
+            retentionMs: 24 * 60 * 60 * 1000,
+            maxMessagesPerRoom: 10_000,
+            identity: null
+        });
         assert.throws(
-            () => new SxServer(httpServer, {}, { reliable: {} }),
+            () => new SxServer(invalidHttpServer, {}, { reliable: { enabled: 'yes' } }),
             /reliable\.enabled/
         );
         assert.throws(
-            () => new SxServer(httpServer, {}, { reliable: { enabled: true } }),
+            () => new SxServer(invalidHttpServer, {}, {
+                reliable: { enabled: true, retentionMs: 0 }
+            }),
             /reliable\.retentionMs/
+        );
+        assert.throws(
+            () => new SxServer(invalidHttpServer, {}, {
+                reliable: {
+                    enabled: true,
+                    maxMessagesPerRoom: 0
+                }
+            }),
+            /reliable\.maxMessagesPerRoom/
+        );
+        assert.throws(
+            () => new SxServer(invalidHttpServer, {}, {
+                reliable: { enabled: true, identity: 'user-id' }
+            }),
+            /reliable\.identity/
         );
         await cleanup(httpServer);
     });
@@ -628,18 +877,51 @@ describe('Reliable room delivery', function () {
 
     it('generates a client ID unless an explicit one is configured', async function () {
         assert.throws(
+            () => createTestClient(1, {}, { reliable: { enabled: 'yes' } }),
+            /reliable\.enabled/
+        );
+        assert.throws(
             () => createTestClient(1, {}, { reliable: { id: '' } }),
             /reliable\.id/
         );
+        const disabledClient = createTestClient(1);
         const generatedClient = createReliableClient(1);
         const otherGeneratedClient = createReliableClient(1);
         const explicitClient = createReliableClient(1, 'explicit-client');
 
         const generatedId = await generatedClient.reliableIdPromise;
         const otherGeneratedId = await otherGeneratedClient.reliableIdPromise;
+        assert.strictEqual(disabledClient.reliable.enabled, false);
+        assert.strictEqual(generatedClient.reliable.enabled, true);
         assert.strictEqual(typeof generatedId, 'string');
         assert.notStrictEqual(generatedId, otherGeneratedId);
         assert.strictEqual(await explicitClient.reliableIdPromise, 'explicit-client');
+    });
+
+    it('waits for client reliable negotiation before resolving connect', async function () {
+        const { httpServer, port } = await createTestServer();
+        const client = createReliableClient(port, 'slow-negotiation-client');
+        const adoptServerSequence = client._adoptReliableServerSequence.bind(client);
+        let releaseNegotiation;
+        const negotiationBlocked = new Promise((resolve) => {
+            releaseNegotiation = resolve;
+        });
+        let connected = false;
+
+        client._adoptReliableServerSequence = async (nextSeq) => {
+            await negotiationBlocked;
+            await adoptServerSequence(nextSeq);
+        };
+        const connection = client.connect('token').then(() => {
+            connected = true;
+        });
+        await waitFor(() => client.reliableReadyPromise !== null);
+        assert.strictEqual(connected, false);
+
+        releaseNegotiation();
+        await connection;
+        assert.strictEqual(connected, true);
+        await cleanup(httpServer, client);
     });
 
     it('serializes initial replay with live sends', async function () {
@@ -837,7 +1119,7 @@ describe('Reliable room delivery', function () {
 
     it('reports when a saved cursor is older than the retained log', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
-            reliable: { enabled: true, retentionMs: 60_000, maxMessagesPerRoom: 2 }
+            reliable: { ...reliable, maxMessagesPerRoom: 2 }
         });
         const room = `reliable-expired-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -861,7 +1143,7 @@ describe('Reliable room delivery', function () {
 
     it('stops a live stream when a detected gap is no longer retained', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
-            reliable: { enabled: true, retentionMs: 60_000, maxMessagesPerRoom: 2 }
+            reliable: { ...reliable, maxMessagesPerRoom: 2 }
         });
         const room = `reliable-live-expired-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const client = createReliableClient(port, 'live-expired-client');

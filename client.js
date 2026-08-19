@@ -6,11 +6,17 @@ function validateReliableConfig(reliable) {
     if (!reliable || typeof reliable !== 'object') {
         throw new Error('reliable must be an object');
     }
+    if (reliable.enabled !== undefined && typeof reliable.enabled !== 'boolean') {
+        throw new Error('reliable.enabled must be a boolean');
+    }
     if (reliable.id !== undefined && (typeof reliable.id !== 'string' || reliable.id.length === 0)) {
         throw new Error('reliable.id must be a non-empty string');
     }
 
-    return { id: reliable.id ?? null };
+    return {
+        enabled: reliable.enabled ?? false,
+        id: reliable.id ?? null
+    };
 }
 
 export default class SxClient {
@@ -18,7 +24,7 @@ export default class SxClient {
         this.url = url;
         this.log = new LemonLog("SxClient", debug);
         this.timeout = timeout;
-        this.reliable = reliable === undefined ? { id: null } : validateReliableConfig(reliable);
+        this.reliable = reliable === undefined ? { enabled: false, id: null } : validateReliableConfig(reliable);
 
         const defaultOpts = {
             path: '/shotx/',
@@ -36,6 +42,13 @@ export default class SxClient {
         this.joinedRooms = new Set(); // Track joined rooms for reconnection
         this.messageHandlers = new Map(); // Track message handlers
         this.reliableRooms = new Map();
+        this.serverReliable = false;
+        this.reliableReadyPromise = null;
+        this.reliableOutbox = new Map();
+        this.reliableOutboundPending = new Map();
+        this.reliableOutboundFlush = null;
+        this.reliableOutboundBlocked = null;
+        this.nextReliableOutboundSeq = 1;
 
         // Add default event name for routing
         this.routeEvent = 'message';
@@ -43,15 +56,17 @@ export default class SxClient {
         // IndexedDB support
         this.db = null;
         this.dbName = 'ShotxOfflineQueue';
-        this.dbVersion = 3;
+        this.dbVersion = 4;
         this.storeName = 'messages';
         this.cursorStoreName = 'reliableCursors';
         this.metadataStoreName = 'reliableMetadata';
+        this.outboxStoreName = 'reliableOutbox';
         this.useIndexedDB = this._checkIndexedDBSupport();
 
         // Initialize IndexedDB if available
         this.dbReady = this.useIndexedDB ? this._initIndexedDB() : Promise.resolve();
         this.reliableIdPromise = this._resolveReliableId();
+        this.reliableOutboxReady = this.useIndexedDB ? this._loadReliableOutbox() : Promise.resolve();
     }
 
     // ============ IndexedDB Methods ============
@@ -80,6 +95,9 @@ export default class SxClient {
                     }
                     if (!db.objectStoreNames.contains(this.metadataStoreName)) {
                         db.createObjectStore(this.metadataStoreName, { keyPath: 'key' });
+                    }
+                    if (!db.objectStoreNames.contains(this.outboxStoreName)) {
+                        db.createObjectStore(this.outboxStoreName, { keyPath: 'key' });
                     }
                 };
             });
@@ -249,10 +267,256 @@ export default class SxClient {
         }
     }
 
+    _reliableOutboundPrefix(reliableId) {
+        return `${this.url}\u0000${reliableId}\u0000`;
+    }
+
+    _reliableOutboundSequenceKey(reliableId) {
+        return `outbound-sequence\u0000${this.url}\u0000${reliableId}`;
+    }
+
+    async _loadReliableOutbox() {
+        await this.dbReady;
+        const reliableId = await this.reliableIdPromise;
+        if (!this.useIndexedDB || !this.db) return;
+
+        const transaction = this.db.transaction([this.outboxStoreName, this.metadataStoreName], 'readonly');
+        const outboxStore = transaction.objectStore(this.outboxStoreName);
+        const metadataStore = transaction.objectStore(this.metadataStoreName);
+        const [records, sequence] = await Promise.all([
+            new Promise((resolve, reject) => {
+                const request = outboxStore.getAll();
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            }),
+            new Promise((resolve, reject) => {
+                const request = metadataStore.get(this._reliableOutboundSequenceKey(reliableId));
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            })
+        ]);
+
+        const prefix = this._reliableOutboundPrefix(reliableId);
+        const matching = records
+            .filter((record) => record.key.startsWith(prefix))
+            .sort((left, right) => left.seq - right.seq);
+        for (const record of matching) {
+            this.reliableOutbox.set(record.seq, record);
+        }
+        const afterOutbox = (matching.at(-1)?.seq ?? 0) + 1;
+        this.nextReliableOutboundSeq = Math.max(sequence?.nextSeq ?? 1, afterOutbox);
+    }
+
+    async _createReliableOutboundRecord(eventName, data, meta) {
+        await this.reliableOutboxReady;
+        const reliableId = await this.reliableIdPromise;
+        let seq = this.nextReliableOutboundSeq;
+        const record = {
+            key: `${this._reliableOutboundPrefix(reliableId)}${seq}`,
+            eventName,
+            data,
+            meta: { ...meta, stream: reliableId, seq },
+            seq,
+            storedAt: Date.now()
+        };
+
+        if (this.useIndexedDB && this.db) {
+            const transaction = this.db.transaction([this.outboxStoreName, this.metadataStoreName], 'readwrite');
+            const outboxStore = transaction.objectStore(this.outboxStoreName);
+            const metadataStore = transaction.objectStore(this.metadataStoreName);
+            const sequenceKey = this._reliableOutboundSequenceKey(reliableId);
+            seq = await new Promise((resolve, reject) => {
+                const request = metadataStore.get(sequenceKey);
+                request.onsuccess = () => {
+                    const allocated = Math.max(request.result?.nextSeq ?? 1, this.nextReliableOutboundSeq);
+                    record.seq = allocated;
+                    record.key = `${this._reliableOutboundPrefix(reliableId)}${allocated}`;
+                    record.meta.seq = allocated;
+                    metadataStore.put({ key: sequenceKey, nextSeq: allocated + 1 });
+                    outboxStore.put(record);
+                    resolve(allocated);
+                };
+                request.onerror = () => reject(request.error);
+                transaction.onerror = () => reject(transaction.error);
+                transaction.onabort = () => reject(transaction.error);
+            });
+            await new Promise((resolve, reject) => {
+                transaction.oncomplete = () => resolve();
+                transaction.onerror = () => reject(transaction.error);
+                transaction.onabort = () => reject(transaction.error);
+            });
+        }
+
+        this.nextReliableOutboundSeq = seq + 1;
+        this.reliableOutbox.set(seq, record);
+        return record;
+    }
+
+    async _deleteReliableOutboundRecord(record) {
+        if (this.useIndexedDB && this.db) {
+            const transaction = this.db.transaction([this.outboxStoreName], 'readwrite');
+            transaction.objectStore(this.outboxStoreName).delete(record.key);
+            await new Promise((resolve, reject) => {
+                transaction.oncomplete = () => resolve();
+                transaction.onerror = () => reject(transaction.error);
+                transaction.onabort = () => reject(transaction.error);
+            });
+        }
+        this.reliableOutbox.delete(record.seq);
+    }
+
+    async _adoptReliableServerSequence(nextSeq) {
+        await this.reliableOutboxReady;
+        const firstPendingSeq = Math.min(...this.reliableOutbox.keys());
+        if (Number.isFinite(firstPendingSeq)) {
+            if (firstPendingSeq > nextSeq) {
+                const error = new Error(`Reliable client outbox is missing sequence ${nextSeq}`);
+                error.code = 'RELIABLE_RESYNC_REQUIRED';
+                throw error;
+            }
+            return;
+        }
+        if (this.nextReliableOutboundSeq > nextSeq) {
+            const error = new Error(`Reliable server expects sequence ${nextSeq}, client expects ${this.nextReliableOutboundSeq}`);
+            error.code = 'RELIABLE_RESYNC_REQUIRED';
+            throw error;
+        }
+        if (this.nextReliableOutboundSeq === nextSeq) return;
+
+        this.nextReliableOutboundSeq = nextSeq;
+        if (this.useIndexedDB && this.db) {
+            const reliableId = await this.reliableIdPromise;
+            const transaction = this.db.transaction([this.metadataStoreName], 'readwrite');
+            transaction.objectStore(this.metadataStoreName).put({
+                key: this._reliableOutboundSequenceKey(reliableId),
+                nextSeq
+            });
+            await new Promise((resolve, reject) => {
+                transaction.oncomplete = () => resolve();
+                transaction.onerror = () => reject(transaction.error);
+                transaction.onabort = () => reject(transaction.error);
+            });
+        }
+    }
+
+    _blockReliableOutbox(error) {
+        this.reliableOutboundBlocked = error;
+        for (const pending of this.reliableOutboundPending.values()) {
+            if (pending.timer) clearTimeout(pending.timer);
+            pending.reject(error);
+        }
+        this.reliableOutboundPending.clear();
+    }
+
+    _isReliableApplicationMessage(eventName, meta) {
+        return eventName === this.routeEvent
+            && typeof meta.type === 'string'
+            && !meta.type.startsWith('sx_');
+    }
+
+    async _sendReliableMessage(eventName, data, meta, { timeout } = {}) {
+        if (this.reliableOutboundBlocked) throw this.reliableOutboundBlocked;
+        const record = await this._createReliableOutboundRecord(eventName, data, meta);
+        const ms = timeout ?? this.timeout;
+
+        const delivery = new Promise((resolve, reject) => {
+            let timer;
+            if (ms > 0) {
+                timer = setTimeout(() => {
+                    reject(new Error(`TIMEOUT: ${meta.type || eventName} (${ms}ms)`));
+                }, ms);
+            }
+            this.reliableOutboundPending.set(record.seq, { resolve, reject, timer });
+        });
+        this._scheduleReliableOutboxFlush();
+        return delivery;
+    }
+
+    _scheduleReliableOutboxFlush() {
+        if (this.reliableOutboundFlush || !this.serverReliable || !this.isConnected || !this.socket) return;
+
+        this.reliableOutboundFlush = this._flushReliableOutbox()
+            .catch((error) => {
+                this._blockReliableOutbox(error);
+                this.log.error('> Reliable client outbox failed:', error);
+            })
+            .finally(() => {
+                this.reliableOutboundFlush = null;
+                if (!this.reliableOutboundBlocked && this.serverReliable && this.isConnected && this.reliableOutbox.size > 0) {
+                    this._scheduleReliableOutboxFlush();
+                }
+            });
+    }
+
+    async _flushReliableOutbox() {
+        await this.reliableOutboxReady;
+        while (this.serverReliable && this.isConnected && this.socket && this.reliableOutbox.size > 0) {
+            const record = [...this.reliableOutbox.values()].sort((left, right) => left.seq - right.seq)[0];
+            const attempt = await this._emitReliableRecord(record);
+            if (attempt.disconnected) return;
+
+            const { response } = attempt;
+            if (response?.meta?.code === 'RELIABLE_REPLAY_REQUIRED') {
+                if (!this.reliableOutbox.has(response.meta.expectedSeq)) {
+                    const error = new Error(`Reliable client outbox is missing sequence ${response.meta.expectedSeq}`);
+                    error.code = 'RELIABLE_RESYNC_REQUIRED';
+                    throw error;
+                }
+                continue;
+            }
+            if (response?.meta?.code === 'RELIABLE_RESYNC_REQUIRED'
+                || response?.meta?.code === 'RELIABLE_SEQUENCE_CONFLICT') {
+                const error = new Error(response.meta.error);
+                error.code = response.meta.code;
+                error.expectedSeq = response.meta.expectedSeq;
+                throw error;
+            }
+            if (response?.meta?.reliable !== true || response.meta.seq !== record.seq || response.meta.id !== record.meta.id) {
+                throw new Error(`Invalid reliable acknowledgement for sequence ${record.seq}`);
+            }
+
+            await this._deleteReliableOutboundRecord(record);
+            const pending = this.reliableOutboundPending.get(record.seq);
+            if (pending) {
+                if (pending.timer) clearTimeout(pending.timer);
+                this.reliableOutboundPending.delete(record.seq);
+                if (response.meta.success) {
+                    pending.resolve(response.data);
+                } else {
+                    const error = new Error(response.meta.error || 'Unknown error');
+                    error.code = response.meta.code;
+                    pending.reject(error);
+                }
+            }
+        }
+    }
+
+    _emitReliableRecord(record) {
+        const socket = this.socket;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (result) => {
+                if (settled) return;
+                settled = true;
+                socket.off('disconnect', onDisconnect);
+                resolve(result);
+            };
+            const onDisconnect = () => finish({ disconnected: true });
+            socket.once('disconnect', onDisconnect);
+            socket.emit(record.eventName, { meta: record.meta, data: record.data }, (response) => {
+                finish({ response });
+            });
+        });
+    }
+
     // ============ Main send method ============
     async emit(eventName, data, meta = {}, { timeout } = {}) {
         // Add UUID to meta
         meta.id = uuidv7();
+
+        if (this.reliable.enabled && this._isReliableApplicationMessage(eventName, meta)) {
+            return this._sendReliableMessage(eventName, data, meta, { timeout });
+        }
 
         // Si está offline, devolvemos una promesa que se resuelve/rechaza cuando se procese
         if (!this.isConnected) {
@@ -317,6 +581,12 @@ export default class SxClient {
         while (this.offlineQueue.length > 0) {
             const { eventName, data, meta, resolve, reject } = this.offlineQueue.shift();
             try {
+                if (this.reliable.enabled && this._isReliableApplicationMessage(eventName, meta)) {
+                    const result = await this._sendReliableMessage(eventName, data, meta);
+                    if (resolve) resolve(result);
+                    processedCount++;
+                    continue;
+                }
                 // Si hay resolve/reject (mensaje encolado offline), los usamos
                 if (resolve && reject) {
                     this.log.info(`> Processing queued message (live): ${meta.type || eventName}`);
@@ -563,12 +833,16 @@ export default class SxClient {
                 }, ms);
             }
 
-            const attemptConnection = () => {
+            const attemptConnection = async () => {
                 if (this.socket) {
                     this.socket.disconnect();
                 }
-                this.opts.auth = { token };
+                const reliableId = await this.reliableIdPromise;
+                this.serverReliable = false;
+                this.reliableReadyPromise = null;
+                this.opts.auth = { token, reliableId, reliableEnabled: this.reliable.enabled };
                 this.socket = io(this.url, this.opts);
+                const socket = this.socket;
 
                 this.socket.on('connect', () => {
                     this.log.info('> connect');
@@ -588,18 +862,51 @@ export default class SxClient {
                 this.socket.on('disconnect', () => {
                     this.log.info('> disconnect');
                     this.isConnected = false;
+                    this.serverReliable = false;
+                    this.reliableReadyPromise = null;
+                });
+
+                this.socket.on('sx_reliable_ready', ({ nextSeq }) => {
+                    if (!this.reliable.enabled) return;
+                    this.reliableReadyPromise = Promise.resolve().then(async () => {
+                        if (!Number.isSafeInteger(nextSeq) || nextSeq < 1) {
+                            throw new Error('Invalid reliable server state');
+                        }
+                        await this._adoptReliableServerSequence(nextSeq);
+                        if (this.socket !== socket || !this.isConnected) return;
+                        this.serverReliable = true;
+                        this._scheduleReliableOutboxFlush();
+                    });
+                    this.reliableReadyPromise.catch((error) => this._blockReliableOutbox(error));
                 });
 
                 this.socket.on('auth_success', async (data) => {
                     if (timer) clearTimeout(timer);
                     this.log.info('> auth_success', data);
+                    if (this.reliable.enabled) {
+                        if (!this.reliableReadyPromise) {
+                            const error = new Error('Server does not support reliable client delivery');
+                            error.code = 'RELIABLE_UNSUPPORTED';
+                            this.socket.disconnect();
+                            reject(error);
+                            return;
+                        }
+                        try {
+                            await this.reliableReadyPromise;
+                        } catch (error) {
+                            this.socket.disconnect();
+                            reject(error);
+                            return;
+                        }
+                    }
                     await this.processQueue();
                     await this.rejoinRooms();
+                    this._scheduleReliableOutboxFlush();
                     resolve(data);
                 });
             };
 
-            attemptConnection();
+            attemptConnection().catch(reject);
         });
     }
 
@@ -607,6 +914,8 @@ export default class SxClient {
         if (this.socket) {
             this.log.info('> Disconnecting');
             this.isConnected = false;
+            this.serverReliable = false;
+            this.reliableReadyPromise = null;
             this.socket.disconnect();
             this.socket = null;
         }

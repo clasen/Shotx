@@ -141,49 +141,43 @@ try {
 }
 ```
 
-#### Reliable Room Delivery (Optional)
+#### Reliable Delivery (Optional)
 
-Reliable delivery adds a durable, monotonically increasing sequence per room. The server persists each message before emitting it, and each client keeps an independent cursor, buffers out-of-order messages, requests replay from the first missing sequence, and ignores duplicates.
+Reliable delivery is enabled independently on each sender and defaults to `false`. Enabling it on `SxServer` protects server-to-client room messages. Enabling it on `SxClient` protects client-to-server application messages. Receiving reliable messages is automatic and does not require enabling the receiving side.
 
-Configure explicit retention limits on the server. The existing `send()` method then uses reliable delivery for every room message on that server:
+Enable both instances for bidirectional delivery. The existing `send()` methods are used without adding another public method:
 
 ```javascript
 const sxServer = new SxServer(server, {}, {
-    reliable: {
-        enabled: true,
-        retentionMs: 24 * 60 * 60 * 1000,
-        maxMessagesPerRoom: 10_000
-    }
+    reliable: { enabled: true }
 });
 
-await sxServer.to('user-room').send('notification', {
-    message: 'Persisted before delivery'
-});
-```
-
-The client detects reliable messages automatically; it does not need an `enabled` option. In browsers, Shotx generates a UUIDv7 client ID and persists it in IndexedDB by server URL. An explicit, non-secret ID overrides the generated one when separate logical consumers are needed:
-
-```javascript
 const client = new SxClient('http://localhost:3000', {}, {
-    reliable: { id: 'user-123-device-1' }
+    reliable: { enabled: true }
 });
 
 await client.connect('valid');
-client.onMessage('notification', async (data, socket, meta) => {
-    await applyNotification(data, { idempotencyKey: meta.id });
-});
-client.onMessage('sx_resync_required', async ({ room, latestSeq }) => {
-    await replaceRoomStateFromSnapshot(room);
-    await client.join(room, { afterSeq: latestSeq });
-});
+client.onMessage('notification', async (data) => applyNotification(data));
 await client.join('user-room');
 ```
 
-The cursor advances only after the message handler resolves. A new consumer without a saved cursor receives the currently retained room history. Non-browser consumers can restore a durable cursor explicitly with `join(room, { afterSeq })`.
+With only the server enabled, delivery is reliable only from server to client. With only the client enabled, delivery is reliable only from client to server. The server retains messages and cached acknowledgements for 24 hours, up to 10,000 entries per stream, unless `retentionMs` or `maxMessagesPerRoom` overrides those defaults.
 
-Each logical consumer tracks a broadcast room independently; one consumer's progress never acknowledges messages for another. Browser clients using the generated ID share one logical installation per server URL. Broadcast subscribers that must advance independently should configure distinct `reliable.id` values. In Node.js, the generated ID lasts for the `SxClient` instance, so durable process restarts also require an explicit ID. If a cursor points before the retained history, Shotx leaves that client out of the room and reports `RELIABLE_RESYNC_REQUIRED`, so the application can load a snapshot and rejoin at its `latestSeq`.
+In browsers, Shotx generates a UUIDv7 client ID and persists it in IndexedDB by server URL. An explicit, non-secret ID overrides the generated one when separate logical consumers are needed:
 
-Reliable rooms currently require a single `SxServer` writer for the DeepBase file. Multi-process deployments need a shared transactional sequence and log store.
+```javascript
+const client = new SxClient('http://localhost:3000', {}, {
+    reliable: { enabled: true, id: 'user-123-device-1' }
+});
+```
+
+For server-to-client delivery, the cursor advances only after the client message handler resolves. A new consumer without a saved cursor receives the currently retained room history. Non-browser consumers can restore a durable cursor explicitly with `join(room, { afterSeq })`.
+
+For client-to-server delivery, the client persists each application message before sending it. The server processes messages in sequence and persists the handler response before acknowledging them. If the connection closes after the handler runs but before the acknowledgement arrives, the client resends the same UUIDv7 and sequence; the server returns the stored response without running the handler again. Internal Shotx control messages are not part of the application sequence.
+
+Each logical consumer tracks a broadcast room independently; one consumer's progress never acknowledges messages for another. Browser clients using the generated ID share one logical installation per server URL. Broadcast subscribers and authenticated users that must advance independently should configure distinct `reliable.id` values. A server can additionally provide `reliable.identity(auth, socket)` to scope client sequences by authenticated principal even when its own `enabled` flag is `false`. The identity must be stable and non-secret; never use or persist the authentication token itself. In Node.js, an explicit ID lets a recreated client adopt the server's next sequence when no messages are pending, but the in-memory outbox does not survive a process crash. If a cursor falls outside retained history, Shotx reports `RELIABLE_RESYNC_REQUIRED`; normal gaps inside retention are replayed transparently.
+
+Reliable delivery provides ordered at-least-once transport with deduplication inside the configured retention window. It cannot make arbitrary external side effects exactly-once across a process crash; handlers that call an external system should pass `meta.id` as that system's idempotency key. Reliable storage currently requires a single `SxServer` writer for the DeepBase file. Multi-process deployments need a shared transactional sequence, inbox, and room log store.
 
 ## API Documentation
 
@@ -199,7 +193,7 @@ new SxServer(server, opts, { auto404, debug, reliable })
 - `opts` (optional): Socket.IO server options. CORS is configured by default to allow all origins.
 - `auto404` (optional): Automatically respond with 404 to non-Shotx HTTP requests. Defaults to `true`.
 - `debug` (optional): Log level for the server instance. Defaults to `'none'`. See [Logging](#logging).
-- `reliable` (optional): Connection-level reliable room configuration. Requires an explicit boolean `enabled`; when `true`, positive integer `retentionMs` and `maxMessagesPerRoom` values are also required.
+- `reliable` (optional): Reliable configuration for messages sent by this server. `enabled` defaults to `false`. `retentionMs` defaults to 24 hours and `maxMessagesPerRoom` defaults to 10,000; both also govern cached responses for reliable clients. Optional `identity(auth, socket)` scopes incoming client sequences by authenticated principal.
 
 **Methods**
 
@@ -210,7 +204,7 @@ new SxServer(server, opts, { auto404, debug, reliable })
   Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(data, socket, meta)` parameters.
 
 - **to(room: string): Object**  
-  Returns an object with the existing `send` method. When the server connection has `reliable` configured, `send` returns a promise and persists a sequenced message before emitting it. Without that configuration, it retains the legacy offline-room behavior.
+  Returns an object with the existing `send` method. When reliable delivery is enabled on the server, `send` returns a promise and persists a sequenced message before emitting it. Otherwise, it retains the legacy offline-room behavior.
 
 - **setupListeners()**  
   Automatically configures event listeners for client connection, message reception, disconnection, and error handling. Called automatically in constructor.
@@ -222,6 +216,7 @@ new SxServer(server, opts, { auto404, debug, reliable })
 - `sx_join`: Handles room joining (automatically registered)
 - `sx_leave`: Handles room leaving (automatically registered)
 - `sx_replay`: Replays reliable room messages from a requested sequence (automatically used by the client)
+- `sx_reliable_ready`: Announces the server-side client sequence when the connecting client enables reliable delivery (automatically used by the client)
 
 ### SxClient
 
@@ -235,7 +230,7 @@ new SxClient(url, opts, { debug, timeout, reliable })
 - `opts` (optional): Socket.IO client options.
 - `debug` (optional): Log level for the client instance. Defaults to `'none'`. See [Logging](#logging).
 - `timeout` (optional): Default timeout in milliseconds for `connect()` and `send()` calls. `0` disables timeouts. Defaults to `0`.
-- `reliable` (optional): Client identity override `{ id }`. Reliable message handling is automatic. Browsers generate and persist an ID when omitted; Node.js generates one for the current instance.
+- `reliable` (optional): Reliable configuration for messages sent by this client. `enabled` defaults to `false`; `id` optionally overrides the generated logical client identity. Browsers persist the generated ID with the outbound outbox; Node.js generates one for the current instance. Receiving reliable server messages is automatic regardless of this flag.
 
 **Methods**
 
@@ -249,7 +244,7 @@ new SxClient(url, opts, { debug, timeout, reliable })
   Sends a raw event to the server with optional metadata. If the client is offline, the message is queued and sent when reconnected (timeout does not apply to queued messages).
 
 - **send(type: string, data: any, opts?: { timeout?: number }): Promise<any>**  
-  A helper method that sends a message with the specified type. This is the primary method for sending typed messages. Supports per-call timeout override.
+  A helper method that sends a message with the specified type. When reliable delivery is enabled on the client, application messages are persisted, sequenced, replayed, and deduplicated automatically. Supports per-call timeout override; timing out the caller does not discard an already persisted reliable message.
 
 - **join(room: string, opts?: { afterSeq?: number }): Promise<any>**
   Join a specific room. The client automatically sends its reliable cursor and rejoins after reconnection. `afterSeq` restores a cursor explicitly.
@@ -307,8 +302,8 @@ All messages use a standardized format:
     meta: {
         type: 'message_type',
         id: 'uuid-v7-generated-id',
-        stream: 'room-name',     // Reliable room messages only
-        seq: 7,                  // Reliable room messages only
+        stream: 'room-or-client-id', // Reliable messages only
+        seq: 7,                       // Reliable messages only
         success: true/false,    // Only in responses
         code: 2001,            // Only in error responses
         error: 'error message' // Only in error responses
@@ -325,7 +320,13 @@ All messages use a standardized format:
 - `2002`: Invalid message type
 - `2003`: Unknown message type
 - `2004`: Error processing message
-- `RELIABLE_RESYNC_REQUIRED`: The client's cursor is outside the retained reliable room log
+- `RELIABLE_REPLAY_REQUIRED`: The server is missing an earlier client sequence and requests replay
+- `RELIABLE_RESYNC_REQUIRED`: A room cursor or cached client response is outside the retention window
+- `RELIABLE_SEQUENCE_CONFLICT`: A client sequence was reused with a different message ID
+- `RELIABLE_ID_REQUIRED`: A reliable client did not provide its logical client ID during authentication
+- `RELIABLE_IDENTITY_REQUIRED`: `reliable.identity` did not return a stable authenticated identity
+- `RELIABLE_CONFIG_INVALID`: A client sent an invalid reliable handshake option
+- `RELIABLE_UNSUPPORTED`: A client enabled reliable sending but the server did not negotiate support
 - `AUTH_NULL`: No authentication token provided
 - `AUTH_FAIL`: Invalid authentication credentials
 - `AUTH_ERROR`: Authentication process error
