@@ -1,5 +1,6 @@
 import { createServer } from 'http';
 import { randomUUID } from 'crypto';
+import { resolve } from 'node:path';
 import { SxServer } from '../index.js';
 
 const port = Number(process.env.PORT || 3000);
@@ -9,7 +10,10 @@ const runId = randomUUID();
 const room = `user:${userId}:${runId}`;
 
 const server = createServer();
-const sxServer = new SxServer(server, {}, { debug: 'info' });
+const sxServer = new SxServer(server, {}, {
+    debug: 'info',
+    path: resolve(import.meta.dirname, '..', 'db')
+});
 
 sxServer.setAuthHandler(async (token) => {
     if (token !== 'browser-test-token') return null;

@@ -1,6 +1,7 @@
 import { Server } from 'socket.io';
 import LemonLog from 'lemonlog';
 import DeepBase from 'deepbase';
+import { isAbsolute } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
 
 const reliableRoomStore = 'sxReliableRooms';
@@ -45,9 +46,12 @@ function validateReliableConfig(reliable) {
 
 export default class SxServer {
 
-    constructor(server, opts = {}, { auto404 = true, debug = 'none', reliable } = {}) {
+    constructor(server, opts = {}, { auto404 = true, debug = 'none', reliable, path } = {}) {
         if (!server) {
             throw new Error('HTTP(s) server must be provided');
+        }
+        if (typeof path !== 'string' || path.trim() === '' || !isAbsolute(path)) {
+            throw new Error('path must be an absolute directory path');
         }
 
         this.log = new LemonLog("SxServer", debug);
@@ -74,7 +78,7 @@ export default class SxServer {
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
-        this.db = new DeepBase({ name: 'shotx' });
+        this.db = new DeepBase({ path, name: 'shotx' });
         this.roomOperations = new Map();
         this.clientOperations = new Map();
 

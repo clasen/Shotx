@@ -1,8 +1,12 @@
 import { createServer } from 'http';
+import { resolve } from 'node:path';
 import { SxServer } from '../index.js';
 
 const server = createServer();
-const sxServer = new SxServer(server, {}, { debug: 'debug' });
+const sxServer = new SxServer(server, {}, {
+    debug: 'debug',
+    path: resolve(import.meta.dirname, '..', 'db')
+});
 
 sxServer
     // .setAuthHandler(async (token, socket) => {

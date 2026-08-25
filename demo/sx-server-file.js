@@ -1,10 +1,13 @@
 import { createServer } from 'http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve } from 'node:path';
 import SxServer from '../server.js';
 
 const server = createServer();
-const sxServer = new SxServer(server, {}, { debug: 'debug' });
+const sxServer = new SxServer(server, {}, {
+    debug: 'debug',
+    path: resolve(import.meta.dirname, '..', 'db')
+});
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = join(process.cwd(), 'uploads');

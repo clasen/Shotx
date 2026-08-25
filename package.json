@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
@@ -37,7 +37,7 @@
   },
   "homepage": "https://github.com/clasen/Shotx#readme",
   "dependencies": {
-    "deepbase": "^3.8.4",
+    "deepbase": "^3.9.0",
     "lemonlog": "^1.2.2",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",

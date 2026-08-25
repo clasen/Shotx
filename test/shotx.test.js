@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import { resolve as resolvePath } from 'node:path';
 import { describe, it, before, after } from 'node:test';
 import assert from 'assert';
 import { SxServer } from '../index.js';
@@ -9,7 +10,11 @@ import SxClient from '../client.js';
 function createTestServer(serverOpts = {}, sxOpts = {}) {
     return new Promise((resolve) => {
         const httpServer = createServer();
-        const sxServer = new SxServer(httpServer, serverOpts, { debug: 'none', ...sxOpts });
+        const sxServer = new SxServer(httpServer, serverOpts, {
+            debug: 'none',
+            path: resolvePath(import.meta.dirname, '..', 'db'),
+            ...sxOpts
+        });
         httpServer.listen(0, () => {
             const port = httpServer.address().port;
             resolve({ httpServer, sxServer, port });
@@ -52,6 +57,15 @@ describe('SxServer', function () {
     describe('constructor', function () {
         it('should throw if no HTTP server is provided', function () {
             assert.throws(() => new SxServer(), /HTTP\(s\) server must be provided/);
+        });
+
+        it('should require an absolute persistence path', function () {
+            const httpServer = createServer();
+            assert.throws(() => new SxServer(httpServer), /path must be an absolute directory path/);
+            assert.throws(
+                () => new SxServer(httpServer, {}, { path: 'db' }),
+                /path must be an absolute directory path/
+            );
         });
 
         it('should create server with valid HTTP server', async function () {
@@ -759,7 +773,11 @@ describe('Reliable delivery', function () {
         await waitFor(() => !client.isConnected);
 
         const secondHttpServer = createServer();
-        const secondSxServer = new SxServer(secondHttpServer, {}, { debug: 'none', reliable });
+        const secondSxServer = new SxServer(secondHttpServer, {}, {
+            debug: 'none',
+            path: resolvePath(import.meta.dirname, '..', 'db'),
+            reliable
+        });
         secondSxServer.onMessage('client-restart', (data, socket, meta) => {
             sequences.push(meta.seq);
         });
@@ -837,17 +855,22 @@ describe('Reliable delivery', function () {
             identity: null
         });
         assert.throws(
-            () => new SxServer(invalidHttpServer, {}, { reliable: { enabled: 'yes' } }),
+            () => new SxServer(invalidHttpServer, {}, {
+                path: resolvePath(import.meta.dirname, '..', 'db'),
+                reliable: { enabled: 'yes' }
+            }),
             /reliable\.enabled/
         );
         assert.throws(
             () => new SxServer(invalidHttpServer, {}, {
+                path: resolvePath(import.meta.dirname, '..', 'db'),
                 reliable: { enabled: true, retentionMs: 0 }
             }),
             /reliable\.retentionMs/
         );
         assert.throws(
             () => new SxServer(invalidHttpServer, {}, {
+                path: resolvePath(import.meta.dirname, '..', 'db'),
                 reliable: {
                     enabled: true,
                     maxMessagesPerRoom: 0
@@ -857,6 +880,7 @@ describe('Reliable delivery', function () {
         );
         assert.throws(
             () => new SxServer(invalidHttpServer, {}, {
+                path: resolvePath(import.meta.dirname, '..', 'db'),
                 reliable: { enabled: true, identity: 'user-id' }
             }),
             /reliable\.identity/

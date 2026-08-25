@@ -37,10 +37,13 @@ The server component creates a Socket.IO server and allows you to set up a custo
 ```javascript
 // server.js
 import { createServer } from 'http';
+import { resolve } from 'node:path';
 import SxServer from 'shotx/server';
 
 const server = createServer();
-const sxServer = new SxServer(server);
+const sxServer = new SxServer(server, {}, {
+    path: resolve(import.meta.dirname, 'db')
+});
 
 // Set a custom authentication handler and register message handlers
 sxServer
@@ -93,10 +96,13 @@ Shotx supports room-based communication with message persistence for offline cli
 
 ```javascript
 import { createServer } from 'http';
+import { resolve } from 'node:path';
 import SxServer from 'shotx/server';
 
 const server = createServer();
-const sxServer = new SxServer(server);
+const sxServer = new SxServer(server, {}, {
+    path: resolve(import.meta.dirname, 'db')
+});
 
 sxServer.setAuthHandler(async (token, socket) => {
     return token === 'valid' ? { userId: 'user123' } : null;
@@ -148,7 +154,10 @@ Reliable delivery is enabled independently on each sender and defaults to `false
 Enable both instances for bidirectional delivery. The existing `send()` methods are used without adding another public method:
 
 ```javascript
+import { resolve } from 'node:path';
+
 const sxServer = new SxServer(server, {}, {
+    path: resolve(import.meta.dirname, 'db'),
     reliable: { enabled: true }
 });
 
@@ -187,10 +196,11 @@ The `SxServer` class provides a framework for building the server side of your r
 
 **Constructor**
 ```javascript
-new SxServer(server, opts, { auto404, debug, reliable })
+new SxServer(server, opts, { path, auto404, debug, reliable })
 ```
 - `server` (required): An instance of an HTTP(s) server that Socket.IO will attach to.
 - `opts` (optional): Socket.IO server options. CORS is configured by default to allow all origins.
+- `path` (required): Absolute directory where Shotx stores its DeepBase `shotx.json` file.
 - `auto404` (optional): Automatically respond with 404 to non-Shotx HTTP requests. Defaults to `true`.
 - `debug` (optional): Log level for the server instance. Defaults to `'none'`. See [Logging](#logging).
 - `reliable` (optional): Reliable configuration for messages sent by this server. `enabled` defaults to `false`. `retentionMs` defaults to 24 hours and `maxMessagesPerRoom` defaults to 10,000; both also govern cached responses for reliable clients. Optional `identity(auth, socket)` scopes incoming client sequences by authenticated principal.
@@ -348,7 +358,12 @@ Shotx uses [LemonLog](https://www.npmjs.com/package/lemonlog) for structured log
 **Enabling logs on the server:**
 
 ```javascript
-const sxServer = new SxServer(server, {}, { debug: 'info' });
+import { resolve } from 'node:path';
+
+const sxServer = new SxServer(server, {}, {
+    debug: 'info',
+    path: resolve(import.meta.dirname, 'db')
+});
 ```
 
 **Enabling logs on the client:**
@@ -379,7 +394,12 @@ localStorage.debug = 'Sx*';
 The log instance is also accessible as `this.log` on both `SxServer` and `SxClient` instances, in case you need to log from outside the class:
 
 ```javascript
-const sxServer = new SxServer(server, {}, { debug: 'info' });
+import { resolve } from 'node:path';
+
+const sxServer = new SxServer(server, {}, {
+    debug: 'info',
+    path: resolve(import.meta.dirname, 'db')
+});
 sxServer.log.info('Custom log message');
 ```
 
