@@ -8,6 +8,11 @@ const reliableRoomStore = 'sxReliableRooms';
 const reliableClientStore = 'sxReliableClients';
 const defaultReliableRetentionMs = 24 * 60 * 60 * 1000;
 const defaultReliableMaxMessages = 10_000;
+const reliableStorages = ['memory', 'disk'];
+
+function snapshotReliableValue(value) {
+    return JSON.parse(JSON.stringify(value));
+}
 
 function validateReliableConfig(reliable) {
     if (reliable === undefined) {
@@ -15,7 +20,8 @@ function validateReliableConfig(reliable) {
             enabled: false,
             retentionMs: defaultReliableRetentionMs,
             maxMessagesPerRoom: defaultReliableMaxMessages,
-            identity: null
+            identity: null,
+            storage: 'memory'
         };
     }
     if (!reliable || typeof reliable !== 'object') {
@@ -35,12 +41,16 @@ function validateReliableConfig(reliable) {
     if (reliable.identity !== undefined && typeof reliable.identity !== 'function') {
         throw new Error('reliable.identity must be a function');
     }
+    if (reliable.storage !== undefined && !reliableStorages.includes(reliable.storage)) {
+        throw new Error(`reliable.storage must be one of: ${reliableStorages.join(', ')}`);
+    }
 
     return {
         enabled: reliable.enabled ?? false,
         retentionMs: reliable.retentionMs ?? defaultReliableRetentionMs,
         maxMessagesPerRoom: reliable.maxMessagesPerRoom ?? defaultReliableMaxMessages,
-        identity: reliable.identity ?? null
+        identity: reliable.identity ?? null,
+        storage: reliable.storage ?? 'memory'
     };
 }
 
@@ -56,6 +66,7 @@ export default class SxServer {
 
         this.log = new LemonLog("SxServer", debug);
         this.reliable = validateReliableConfig(reliable);
+        this.reliableEpoch = this.reliable.storage === 'memory' ? uuidv7() : null;
 
         const defaultOptions = {
             path: '/shotx/',
@@ -78,9 +89,13 @@ export default class SxServer {
 
         this.messageHandlers = new Map();
         this.authHandler = this.defaultAuthHandler;
-        this.db = new DeepBase({ path, name: 'shotx' });
+        this.db = new DeepBase({ path, name: 'shotx', stringify: JSON.stringify });
         this.roomOperations = new Map();
         this.clientOperations = new Map();
+        this.memoryRoomStates = new Map();
+        this.memoryClientStates = new Map();
+        this.reliableSaves = [];
+        this.reliableSaveRunning = false;
 
         // Configurar middleware de autenticación
         this.io.use(async (socket, next) => {
@@ -167,9 +182,11 @@ export default class SxServer {
             });
 
             try {
-                if (socket.reliableClientEnabled) {
-                    const nextSeq = await this.getReliableClientNextSeq(socket.reliableClientKey);
-                    socket.emit('sx_reliable_ready', { nextSeq });
+                if (socket.reliableClientEnabled || this.reliable.enabled) {
+                    const nextSeq = socket.reliableClientEnabled
+                        ? await this.getReliableClientNextSeq(socket.reliableClientKey)
+                        : undefined;
+                    socket.emit('sx_reliable_ready', { epoch: this.reliableEpoch, nextSeq });
                 }
                 socket.emit('auth_success', socket.auth);
             } catch (error) {
@@ -184,6 +201,7 @@ export default class SxServer {
                 const replay = await this.replayReliableMessages(data.room, socket, {
                     startSeq: Number.isSafeInteger(data.afterSeq) ? data.afterSeq + 1 : null,
                     hasCursor: Number.isSafeInteger(data.afterSeq),
+                    epoch: data.epoch ?? null,
                     joinSocket: true
                 });
                 if (replay.status === 'resync_required') {
@@ -217,35 +235,37 @@ export default class SxServer {
 
             return this.replayReliableMessages(data.room, socket, {
                 startSeq: data.fromSeq,
-                hasCursor: true
+                hasCursor: true,
+                epoch: data.epoch ?? null
             });
         });
     }
 
     async handleMessage(socket, message, callback) {
+        const respond = typeof callback === 'function' ? callback : () => {};
         try {
             // Validate that message is an object
             if (!message || typeof message !== 'object') {
-                return callback({ meta: { success: false, code: 2001, error: 'Invalid message format' }, data: null });
+                return respond({ meta: { success: false, code: 2001, error: 'Invalid message format' }, data: null });
             }
 
             const { meta, data } = message;
 
             // Validate that meta exists and has a valid message type
             if (!meta || typeof meta.type !== 'string') {
-                return callback({ meta: { success: false, code: 2002, error: 'Invalid message type' }, data: null });
+                return respond({ meta: { success: false, code: 2002, error: 'Invalid message type' }, data: null });
             }
 
             this.log.info(`<-- [${socket.id}] - ${meta.type}`, message);
 
             if (socket.reliableClientEnabled && (meta.seq !== undefined || meta.stream !== undefined)) {
-                return callback(await this.handleReliableClientMessage(socket, message));
+                return respond(await this.handleReliableClientMessage(socket, message));
             }
 
-            callback(await this.executeMessageHandler(socket, meta, data));
+            respond(await this.executeMessageHandler(socket, meta, data));
         } catch (error) {
             this.log.error(`<-- [${socket.id}] Error al procesar el mensaje:`, error);
-            callback({ meta: { success: false, code: 2004, error: error.message || 'Error processing message' }, data: null });
+            respond({ meta: { success: false, code: 2004, error: error.message || 'Error processing message' }, data: null });
         }
     }
 
@@ -315,10 +335,11 @@ export default class SxServer {
                 storedAt: now
             };
 
+            const storedMessage = this.reliable.storage === 'memory' ? snapshotReliableValue(message) : message;
             state.nextSeq += 1;
-            state.messages.push(message);
+            state.messages.push(storedMessage);
             this.pruneReliableState(state, now);
-            await this.db.set(reliableRoomStore, room, state);
+            await this.saveReliableState(reliableRoomStore, room, state);
 
             const envelope = this.toReliableEnvelope(message);
             this.io.to(room).emit('message', envelope);
@@ -343,6 +364,15 @@ export default class SxServer {
     }
 
     async loadReliableState(room) {
+        if (this.reliable.storage === 'memory') {
+            let state = this.memoryRoomStates.get(room);
+            if (!state) {
+                state = { nextSeq: 1, messages: [] };
+                this.memoryRoomStates.set(room, state);
+            }
+            return state;
+        }
+
         const stored = await this.db.get(reliableRoomStore, room);
         if (stored === null) {
             return { nextSeq: 1, messages: [] };
@@ -381,19 +411,27 @@ export default class SxServer {
         };
     }
 
-    replayReliableMessages(room, socket, { startSeq, hasCursor, joinSocket = false }) {
+    replayReliableMessages(room, socket, { startSeq, hasCursor, joinSocket = false, epoch = this.reliableEpoch }) {
         return this.runRoomOperation(room, async () => {
             const state = await this.loadReliableState(room);
             const originalLength = state.messages.length;
             this.pruneReliableState(state, Date.now());
             if (state.messages.length !== originalLength) {
-                await this.db.set(reliableRoomStore, room, state);
+                await this.saveReliableState(reliableRoomStore, room, state);
             }
 
             const latestSeq = state.nextSeq - 1;
             const earliestSeq = state.messages[0]?.meta?.seq ?? state.nextSeq;
             const requestedSeq = startSeq ?? earliestSeq;
 
+            if (hasCursor && epoch !== this.reliableEpoch) {
+                return {
+                    status: 'resync_required',
+                    reason: 'server_restarted',
+                    earliestSeq,
+                    latestSeq
+                };
+            }
             if (hasCursor && requestedSeq < earliestSeq && requestedSeq <= latestSeq) {
                 return {
                     status: 'resync_required',
@@ -440,7 +478,76 @@ export default class SxServer {
         return current;
     }
 
+    saveReliableState(store, key, state) {
+        if (this.reliable.storage === 'memory') {
+            return Promise.resolve();
+        }
+
+        return new Promise((resolve, reject) => {
+            this.reliableSaves.push({ store, key, state, resolve, reject });
+            if (!this.reliableSaveRunning) {
+                this.reliableSaveRunning = true;
+                setImmediate(() => this.flushReliableSaves());
+            }
+        });
+    }
+
+    async flushReliableSaves() {
+        const entries = this.reliableSaves;
+        this.reliableSaves = [];
+        try {
+            if (entries.length === 1) {
+                const [entry] = entries;
+                await this.db.set(entry.store, entry.key, entry.state);
+            } else if (entries.length > 1) {
+                await this.db.upd((root) => {
+                    if (root === null || typeof root !== 'object' || Array.isArray(root)) {
+                        throw new Error('Corrupt persistence root');
+                    }
+                    for (const entry of entries) {
+                        const stored = root[entry.store];
+                        if (stored !== undefined && stored !== null && (typeof stored !== 'object' || Array.isArray(stored))) {
+                            throw new Error(`Corrupt reliable store: ${entry.store}`);
+                        }
+                        const storeNode = stored ?? {};
+                        Object.defineProperty(storeNode, entry.key, {
+                            value: entry.state,
+                            writable: true,
+                            enumerable: true,
+                            configurable: true
+                        });
+                        Object.defineProperty(root, entry.store, {
+                            value: storeNode,
+                            writable: true,
+                            enumerable: true,
+                            configurable: true
+                        });
+                    }
+                    return root;
+                });
+            }
+            for (const entry of entries) entry.resolve();
+        } catch (error) {
+            for (const entry of entries) entry.reject(error);
+        } finally {
+            if (this.reliableSaves.length > 0) {
+                setImmediate(() => this.flushReliableSaves());
+            } else {
+                this.reliableSaveRunning = false;
+            }
+        }
+    }
+
     async loadReliableClientState(clientKey) {
+        if (this.reliable.storage === 'memory') {
+            let state = this.memoryClientStates.get(clientKey);
+            if (!state) {
+                state = { nextSeq: 1, responses: [] };
+                this.memoryClientStates.set(clientKey, state);
+            }
+            return state;
+        }
+
         const stored = await this.db.get(reliableClientStore, clientKey);
         if (stored === null) {
             return { nextSeq: 1, responses: [] };
@@ -480,7 +587,7 @@ export default class SxServer {
             const originalLength = state.responses.length;
             this.pruneReliableClientState(state, Date.now());
             if (state.responses.length !== originalLength) {
-                await this.db.set(reliableClientStore, clientKey, state);
+                await this.saveReliableState(reliableClientStore, clientKey, state);
             }
             return state.nextSeq;
         });
@@ -547,10 +654,16 @@ export default class SxServer {
                 meta: { ...handled.meta, reliable: true, seq: meta.seq, id: meta.id },
                 data: handled.data
             };
+            const storedResponse = this.reliable.storage === 'memory' ? snapshotReliableValue(response) : response;
             state.nextSeq += 1;
-            state.responses.push({ seq: meta.seq, id: meta.id, response, storedAt: now });
+            state.responses.push({
+                seq: meta.seq,
+                id: meta.id,
+                response: storedResponse,
+                storedAt: now
+            });
             this.pruneReliableClientState(state, now);
-            await this.db.set(reliableClientStore, socket.reliableClientKey, state);
+            await this.saveReliableState(reliableClientStore, socket.reliableClientKey, state);
             return response;
         });
     }

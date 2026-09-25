@@ -1,6 +1,6 @@
 {
   "name": "shotx",
-  "version": "1.7.0",
+  "version": "1.7.2",
   "description": "🚅 Shotx - Powerful real-time communication library.",
   "type": "module",
   "main": "index.js",
@@ -31,7 +31,9 @@
     "url": "https://github.com/clasen/Shotx/issues"
   },
   "scripts": {
-    "test": "node --test test/shotx.test.js",
+    "test": "node --test test/*.test.js",
+    "test:stress": "node --test test/stress.test.js",
+    "benchmark": "node benchmark/run.js",
     "test:browser:server": "node demo/room-reconnect-server.js",
     "test:browser:ui": "npm --prefix demo run dev -- --host 127.0.0.1"
   },

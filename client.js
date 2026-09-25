@@ -43,6 +43,8 @@ export default class SxClient {
         this.messageHandlers = new Map(); // Track message handlers
         this.reliableRooms = new Map();
         this.serverReliable = false;
+        this.reliableServerEpoch = null;
+        this.reliableOutboundEpoch = undefined;
         this.reliableReadyPromise = null;
         this.reliableOutbox = new Map();
         this.reliableOutboundPending = new Map();
@@ -112,25 +114,19 @@ export default class SxClient {
     }
 
     async _saveMessageToIndexedDB(message) {
+        await this.dbReady;
         if (!this.useIndexedDB || !this.db) return;
 
-        try {
-            const transaction = this.db.transaction([this.storeName], 'readwrite');
-            const store = transaction.objectStore(this.storeName);
-            
-            const messageWithTimestamp = {
-                ...message,
-                timestamp: Date.now()
-            };
-            
-            await new Promise((resolve, reject) => {
-                const request = store.add(messageWithTimestamp);
-                request.onsuccess = () => resolve(request.result);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (error) {
-            this.log.warn('> Failed to save message to IndexedDB:', error.message);
-        }
+        const transaction = this.db.transaction([this.storeName], 'readwrite');
+        const request = transaction.objectStore(this.storeName).add({
+            ...message,
+            timestamp: Date.now()
+        });
+        return new Promise((resolve, reject) => {
+            transaction.oncomplete = () => resolve(request.result);
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error || new Error('Message persistence aborted'));
+        });
     }
 
     async _loadPersistedMessages() {
@@ -149,8 +145,8 @@ export default class SxClient {
             // Sort by timestamp and add to queue
             messages.sort((a, b) => a.timestamp - b.timestamp);
             for (const message of messages) {
-                // Remove timestamp and id before adding to queue
                 const { timestamp, id, ...queueMessage } = message;
+                queueMessage.persistedId = id;
                 // Add null resolve/reject for persisted messages since they can't be serialized
                 queueMessage.resolve = null;
                 queueMessage.reject = null;
@@ -168,21 +164,16 @@ export default class SxClient {
         }
     }
 
-    async _clearPersistedMessages() {
-        if (!this.useIndexedDB || !this.db) return;
+    async _deletePersistedMessage(id) {
+        if (id === undefined || !this.useIndexedDB || !this.db) return;
 
-        try {
-            const transaction = this.db.transaction([this.storeName], 'readwrite');
-            const store = transaction.objectStore(this.storeName);
-            
-            await new Promise((resolve, reject) => {
-                const request = store.clear();
-                request.onsuccess = () => resolve();
-                request.onerror = () => reject(request.error);
-            });
-        } catch (error) {
-            this.log.warn('> Failed to clear persisted messages:', error.message);
-        }
+        const transaction = this.db.transaction([this.storeName], 'readwrite');
+        transaction.objectStore(this.storeName).delete(id);
+        await new Promise((resolve, reject) => {
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error || new Error('Message deletion aborted'));
+        });
     }
 
     _reliableIdentityKey() {
@@ -236,14 +227,16 @@ export default class SxClient {
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(request.error);
             });
-            return Number.isSafeInteger(record?.seq) && record.seq >= 0 ? record.seq : null;
+            return Number.isSafeInteger(record?.seq) && record.seq >= 0
+                ? { seq: record.seq, epoch: record.epoch ?? null }
+                : null;
         } catch (error) {
             this.log.warn('> Failed to load reliable cursor:', error.message);
             return null;
         }
     }
 
-    async _saveReliableCursor(room, seq, { replace = false } = {}) {
+    async _saveReliableCursor(room, seq, { replace = false, epoch = this.reliableRooms.get(room)?.epoch ?? null } = {}) {
         await this.dbReady;
         if (!this.useIndexedDB || !this.db) return;
 
@@ -255,8 +248,9 @@ export default class SxClient {
                 const key = this._reliableCursorKey(room, reliableId);
                 const request = store.get(key);
                 request.onsuccess = () => {
-                    const savedSeq = Number.isSafeInteger(request.result?.seq) ? request.result.seq : -1;
-                    const putRequest = store.put({ key, seq: replace ? seq : Math.max(savedSeq, seq) });
+                    const savedSeq = (request.result?.epoch ?? null) === epoch && Number.isSafeInteger(request.result?.seq)
+                        ? request.result.seq : -1;
+                    const putRequest = store.put({ key, seq: replace ? seq : Math.max(savedSeq, seq), epoch });
                     putRequest.onsuccess = () => resolve();
                     putRequest.onerror = () => reject(putRequest.error);
                 };
@@ -305,6 +299,7 @@ export default class SxClient {
         }
         const afterOutbox = (matching.at(-1)?.seq ?? 0) + 1;
         this.nextReliableOutboundSeq = Math.max(sequence?.nextSeq ?? 1, afterOutbox);
+        this.reliableOutboundEpoch = sequence?.epoch;
     }
 
     async _createReliableOutboundRecord(eventName, data, meta) {
@@ -332,7 +327,7 @@ export default class SxClient {
                     record.seq = allocated;
                     record.key = `${this._reliableOutboundPrefix(reliableId)}${allocated}`;
                     record.meta.seq = allocated;
-                    metadataStore.put({ key: sequenceKey, nextSeq: allocated + 1 });
+                    metadataStore.put({ key: sequenceKey, nextSeq: allocated + 1, epoch: this.reliableOutboundEpoch });
                     outboxStore.put(record);
                     resolve(allocated);
                 };
@@ -365,31 +360,38 @@ export default class SxClient {
         this.reliableOutbox.delete(record.seq);
     }
 
-    async _adoptReliableServerSequence(nextSeq) {
+    async _adoptReliableServerSequence(nextSeq, epoch = null) {
         await this.reliableOutboxReady;
+        const epochChanged = this.reliableOutboundEpoch !== undefined && this.reliableOutboundEpoch !== epoch;
         const firstPendingSeq = Math.min(...this.reliableOutbox.keys());
         if (Number.isFinite(firstPendingSeq)) {
+            if (epochChanged) {
+                const error = new Error('Reliable server history changed while client messages are pending');
+                error.code = 'RELIABLE_RESYNC_REQUIRED';
+                throw error;
+            }
             if (firstPendingSeq > nextSeq) {
                 const error = new Error(`Reliable client outbox is missing sequence ${nextSeq}`);
                 error.code = 'RELIABLE_RESYNC_REQUIRED';
                 throw error;
             }
-            return;
-        }
-        if (this.nextReliableOutboundSeq > nextSeq) {
+        } else if (!epochChanged && this.nextReliableOutboundSeq > nextSeq) {
             const error = new Error(`Reliable server expects sequence ${nextSeq}, client expects ${this.nextReliableOutboundSeq}`);
             error.code = 'RELIABLE_RESYNC_REQUIRED';
             throw error;
         }
-        if (this.nextReliableOutboundSeq === nextSeq) return;
+        const adoptedSeq = Number.isFinite(firstPendingSeq) ? this.nextReliableOutboundSeq : nextSeq;
+        if (this.nextReliableOutboundSeq === adoptedSeq && this.reliableOutboundEpoch === epoch) return;
 
-        this.nextReliableOutboundSeq = nextSeq;
+        this.nextReliableOutboundSeq = adoptedSeq;
+        this.reliableOutboundEpoch = epoch;
         if (this.useIndexedDB && this.db) {
             const reliableId = await this.reliableIdPromise;
             const transaction = this.db.transaction([this.metadataStoreName], 'readwrite');
             transaction.objectStore(this.metadataStoreName).put({
                 key: this._reliableOutboundSequenceKey(reliableId),
-                nextSeq
+                nextSeq: adoptedSeq,
+                epoch
             });
             await new Promise((resolve, reject) => {
                 transaction.oncomplete = () => resolve();
@@ -451,7 +453,10 @@ export default class SxClient {
     async _flushReliableOutbox() {
         await this.reliableOutboxReady;
         while (this.serverReliable && this.isConnected && this.socket && this.reliableOutbox.size > 0) {
-            const record = [...this.reliableOutbox.values()].sort((left, right) => left.seq - right.seq)[0];
+            let record;
+            for (const pending of this.reliableOutbox.values()) {
+                if (!record || pending.seq < record.seq) record = pending;
+            }
             const attempt = await this._emitReliableRecord(record);
             if (attempt.disconnected) return;
 
@@ -529,7 +534,12 @@ export default class SxClient {
                 if (this.useIndexedDB) {
                     // Create a serializable version without resolve/reject functions
                     const persistableMessage = { eventName, data, meta };
-                    this._saveMessageToIndexedDB(persistableMessage);
+                    queueMessage.persistence = this._saveMessageToIndexedDB(persistableMessage);
+                    queueMessage.persistence.catch((error) => {
+                        const index = this.offlineQueue.indexOf(queueMessage);
+                        if (index !== -1) this.offlineQueue.splice(index, 1);
+                        reject(error);
+                    });
                 }
             });
         }
@@ -570,45 +580,31 @@ export default class SxClient {
 
     // Process queued messages after reconnection
     async processQueue() {
+        await this.dbReady;
         if (!this.isConnected) return;
         if (this.offlineQueue.length > 0) {
             this.log.info(`> processQueue (${this.offlineQueue.length} messages).`);
         }
 
-        const originalQueueLength = this.offlineQueue.length;
-        let processedCount = 0;
-
-        while (this.offlineQueue.length > 0) {
-            const { eventName, data, meta, resolve, reject } = this.offlineQueue.shift();
+        while (this.isConnected && this.offlineQueue.length > 0) {
+            const { eventName, data, meta, resolve, reject, persistence, persistedId } = this.offlineQueue.shift();
             try {
-                if (this.reliable.enabled && this._isReliableApplicationMessage(eventName, meta)) {
-                    const result = await this._sendReliableMessage(eventName, data, meta);
-                    if (resolve) resolve(result);
-                    processedCount++;
-                    continue;
-                }
-                // Si hay resolve/reject (mensaje encolado offline), los usamos
+                const delivery = Promise.resolve(persistence ?? persistedId).then(async (id) => {
+                    const result = this.reliable.enabled && this._isReliableApplicationMessage(eventName, meta)
+                        ? await this._sendReliableMessage(eventName, data, meta)
+                        : await this._emitMessage(eventName, data, meta);
+                    await this._deletePersistedMessage(id);
+                    return result;
+                });
                 if (resolve && reject) {
-                    this.log.info(`> Processing queued message (live): ${meta.type || eventName}`);
-                    this._emitMessage(eventName, data, meta)
-                        .then(resolve)
-                        .catch(reject);
+                    delivery.then(resolve, reject);
                 } else {
-                    // Mensaje persistido desde IndexedDB, solo enviamos
-                    this.log.info(`> Processing persisted message: ${meta.type || eventName}`, data);
-                    await this._emitMessage(eventName, data, meta);
+                    await delivery;
                 }
-                processedCount++;
             } catch (error) {
                 this.log.error('> Error processQueue', error);
                 if (reject) reject(error);
             }
-        }
-
-        // Clear IndexedDB after successfully processing all messages
-        if (processedCount === originalQueueLength && this.useIndexedDB) {
-            await this._clearPersistedMessages();
-            this.log.info('> Cleared persisted messages from IndexedDB');
         }
     }
 
@@ -624,14 +620,18 @@ export default class SxClient {
                 this.log.info(`> Rejoined room: ${room}`);
             } catch (error) {
                 this.log.error(`> Failed to rejoin room ${room}:`, error);
+                if (error.code === 'RELIABLE_RESYNC_REQUIRED') {
+                    await this._notifyReliableResync(this.reliableRooms.get(room), error.details);
+                }
             }
         }
     }
 
     // Internal method to join room without tracking
     async _joinRoom(room) {
-        const data = { room };
         const state = await this._prepareReliableRoom(room);
+        if (state.lastSeq === null) state.epoch = this.reliableServerEpoch;
+        const data = { room, epoch: state.epoch };
         if (state.lastSeq !== null) {
             data.afterSeq = state.lastSeq;
         }
@@ -650,10 +650,11 @@ export default class SxClient {
 
         let state = this.reliableRooms.get(room);
         if (!state || afterSeq !== undefined) {
-            const cursor = afterSeq ?? await this._loadReliableCursor(room);
+            const cursor = afterSeq === undefined ? await this._loadReliableCursor(room) : null;
             state = {
                 room,
-                lastSeq: cursor,
+                lastSeq: afterSeq ?? cursor?.seq ?? null,
+                epoch: cursor ? cursor.epoch : this.reliableServerEpoch,
                 buffer: new Map(),
                 processing: Promise.resolve(),
                 replayPromise: null,
@@ -685,6 +686,7 @@ export default class SxClient {
             state = {
                 room: stream,
                 lastSeq: null,
+                epoch: this.reliableServerEpoch,
                 buffer: new Map(),
                 processing: Promise.resolve(),
                 replayPromise: null,
@@ -742,7 +744,7 @@ export default class SxClient {
             if (state.lastReplayFrom !== null && state.lastSeq >= state.lastReplayFrom) {
                 state.lastReplayFrom = null;
             }
-            await this._saveReliableCursor(state.room, seq);
+            await this._saveReliableCursor(state.room, seq, { epoch: state.epoch });
         }
 
         const bufferedSeqs = [...state.buffer.keys()];
@@ -760,18 +762,11 @@ export default class SxClient {
         }
 
         state.lastReplayFrom = fromSeq;
-        state.replayPromise = this.send('sx_replay', { room: state.room, fromSeq })
+        state.replayPromise = this.send('sx_replay', { room: state.room, fromSeq, epoch: state.epoch })
             .then(async (result) => {
                 if (result?.status !== 'resync_required') return;
-                state.resyncRequired = result;
-                const error = this._createResyncError(state.room, result);
-                this.log.error(`> ${error.message}`, result);
                 await this.send('sx_leave', { room: state.room });
-                this.joinedRooms.delete(state.room);
-                const handler = this.messageHandlers.get('sx_resync_required');
-                if (handler) {
-                    await handler({ room: state.room, ...result }, this.socket);
-                }
+                await this._notifyReliableResync(state, result);
             })
             .catch((error) => {
                 state.lastReplayFrom = null;
@@ -780,6 +775,20 @@ export default class SxClient {
             .finally(() => {
                 state.replayPromise = null;
             });
+    }
+
+    async _notifyReliableResync(state, details) {
+        state.resyncRequired = details;
+        this.joinedRooms.delete(state.room);
+        this.log.error(`> Reliable room requires resynchronization: ${state.room}`, details);
+        const handler = this.messageHandlers.get('sx_resync_required');
+        if (handler) {
+            try {
+                await handler({ room: state.room, ...details }, this.socket);
+            } catch (error) {
+                this.log.error('> Error in resynchronization handler:', error);
+            }
+        }
     }
 
     // Setup centralized message routing
@@ -852,10 +861,16 @@ export default class SxClient {
                 });
 
                 this.socket.on('connect_error', (error) => {
+                    this.isConnected = false;
+                    if (!socket.active) {
+                        if (timer) clearTimeout(timer);
+                        this.log.warn(`> Connection rejected: ${error.message}`);
+                        reject(error);
+                        return;
+                    }
                     retryCount++;
                     const delay = Math.min(1000 * Math.pow(2, retryCount - 1), this.opts.reconnectionDelayMax);
                     this.log.warn(`> connect_error (attempt ${retryCount}): ${error.message}, retrying in ${delay}ms`);
-                    this.isConnected = false;
                     // Don't reject, let Socket.IO handle reconnection
                 });
 
@@ -866,13 +881,15 @@ export default class SxClient {
                     this.reliableReadyPromise = null;
                 });
 
-                this.socket.on('sx_reliable_ready', ({ nextSeq }) => {
+                this.socket.on('sx_reliable_ready', ({ nextSeq, epoch = null }) => {
+                    this.reliableServerEpoch = epoch;
                     if (!this.reliable.enabled) return;
                     this.reliableReadyPromise = Promise.resolve().then(async () => {
-                        if (!Number.isSafeInteger(nextSeq) || nextSeq < 1) {
+                        if (!Number.isSafeInteger(nextSeq) || nextSeq < 1
+                            || (epoch !== null && (typeof epoch !== 'string' || epoch.length === 0))) {
                             throw new Error('Invalid reliable server state');
                         }
-                        await this._adoptReliableServerSequence(nextSeq);
+                        await this._adoptReliableServerSequence(nextSeq, epoch);
                         if (this.socket !== socket || !this.isConnected) return;
                         this.serverReliable = true;
                         this._scheduleReliableOutboxFlush();

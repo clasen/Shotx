@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Shotx · Regresiones de cola offline (IndexedDB)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px; }
+        #summary { font-weight: 700; margin: 12px 0; }
+        .pass { color: #0a7a2f; } .fail { color: #b00020; }
+    </style>
+</head>
+<body>
+    <h1>Regresiones de cola offline sobre IndexedDB real</h1>
+    <div id="summary">Ejecutando…</div>
+    <ol id="results"></ol>
+    <button id="rerun" type="button">Re-ejecutar</button>
+    <script type="module">
+        import SxClient from '../client.js';
+        const MESSAGES_STORE = 'messages'; // almacén observado, tal como lo expone la librería
+        const CURSORS_STORE = 'reliableCursors'; // almacenes observados del modo reliable
+        const METADATA_STORE = 'reliableMetadata';
+        const OUTBOX_STORE = 'reliableOutbox';
+        const OUTBOUND_SEQUENCE_PREFIX = 'outbound-sequence\u0000';
+        const RELIABLE_ID = 'epoch-client'; // mismo id de cliente en cada recreación
+        const ACK_TIMEOUT_MS = 150; // timeout de transporte, configurado solo para el test
+        const WAIT_TIMEOUT_MS = 5000, CASE_TIMEOUT_MS = 10000;
+        function readMessages(dbName) {
+            return new Promise((resolve, reject) => {
+                const open = indexedDB.open(dbName);
+                open.onerror = () => reject(open.error);
+                open.onsuccess = () => {
+                    const db = open.result;
+                    const request = db.transaction([MESSAGES_STORE], 'readonly').objectStore(MESSAGES_STORE).getAll();
+                    request.onerror = () => { db.close(); reject(request.error); };
+                    request.onsuccess = () => { db.close(); resolve(request.result); };
+                };
+            });
+        }
+        function readStore(dbName, storeName) {
+            return new Promise((resolve, reject) => {
+                const open = indexedDB.open(dbName);
+                open.onerror = () => reject(open.error);
+                open.onsuccess = () => {
+                    const db = open.result;
+                    const request = db.transaction([storeName], 'readonly').objectStore(storeName).getAll();
+                    request.onerror = () => { db.close(); reject(request.error); };
+                    request.onsuccess = () => { db.close(); resolve(request.result); };
+                };
+            });
+        }
+        function deleteDb(dbName) {
+            return new Promise((resolve) => { const request = indexedDB.deleteDatabase(dbName); request.onsuccess = request.onerror = request.onblocked = () => resolve(); });
+        }
+        function assert(condition, message) { if (!condition) throw new Error(message); }
+        async function expectRejection(promise, label) {
+            try { await promise; } catch { return; } throw new Error(`${label} debe rechazar`);
+        }
+        function expectRow(rows, predicate, label) {
+            const row = rows.find(predicate);
+            assert(row, `falta la fila esperada: ${label}`);
+            return row;
+        }
+        async function expectResync(promise, label) {
+            try {
+                await promise;
+            } catch (error) {
+                assert(error && error.code === 'RELIABLE_RESYNC_REQUIRED', `${label}: código inesperado (${error && error.code})`);
+                return;
+            }
+            throw new Error(`${label} debe rechazar con RELIABLE_RESYNC_REQUIRED`);
+        }
+        async function waitFor(check, label) {
+            const deadline = Date.now() + WAIT_TIMEOUT_MS;
+            while (!(await check())) {
+                if (Date.now() > deadline) throw new Error(`timeout esperando: ${label}`);
+                await new Promise((resolve) => setTimeout(resolve, 15));
+            }
+        }
+        function withTimeout(promise, label) {
+            return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout del caso: ${label}`)), CASE_TIMEOUT_MS))]);
+        }
+        function createTestClient(dbName, { timeout = 0, reliable } = {}) {
+            class TestClient extends SxClient {
+                async _initIndexedDB() { this.dbName = dbName; return super._initIndexedDB(); } // aísla la base por caso
+            }
+            return new TestClient('http://127.0.0.1:9', { autoConnect: false, reconnection: false }, { timeout, reliable });
+        }
+        function fakeSocket() {
+            const socket = { sent: [] };
+            socket.emit = (eventName, message, ack) => { socket.sent.push({ eventName, message, ack }); return socket; };
+            socket.on = socket.off = socket.once = () => socket;
+            socket.disconnect = () => {};
+            return socket;
+        }
+        function goOnline(client) {
+            const socket = fakeSocket(); client.socket = socket; client.isConnected = true; return socket;
+        }
+        // Aborta la transacción real cuando el add ya tuvo éxito y todavía no hubo commit.
+        function abortMessagesWriteOnAddSuccess(db) {
+            const originalTransaction = db.transaction.bind(db);
+            db.transaction = (stores, mode, ...rest) => {
+                const transaction = originalTransaction(stores, mode, ...rest);
+                if (mode !== 'readwrite' || ![stores].flat().includes(MESSAGES_STORE)) return transaction;
+                const originalObjectStore = transaction.objectStore.bind(transaction);
+                transaction.objectStore = (name) => {
+                    const store = originalObjectStore(name);
+                    if (name !== MESSAGES_STORE) return store;
+                    const originalAdd = store.add.bind(store);
+                    store.add = (value) => {
+                        const request = originalAdd(value);
+                        request.addEventListener('success', () => { try { transaction.abort(); } catch {} });
+                        return request;
+                    };
+                    return store;
+                };
+                return transaction;
+            };
+        }
+
+        // ---------- casos ----------
+        async function offlineBeforeDbReady(ctx) {
+            const client = ctx.newClient();
+            assert(client.db === null, 'el envío debe ocurrir antes de dbReady');
+            client.send('qa_offline', { n: 1 }).catch(() => {}); // nunca se conecta: la promesa queda pendiente
+            const entry = client.offlineQueue.at(-1);
+            assert(entry.persistence, 'la entrada de cola debe exponer persistence');
+            const id = await entry.persistence;
+            const rows = await readMessages(ctx.dbName);
+            assert(rows.length === 1 && rows[0].id === id && rows[0].data.n === 1, 'debe persistirse 1 fila con el payload y el ID devuelto');
+        }
+
+        async function keepsUntilAck(ctx) {
+            const client = ctx.newClient();
+            let acked = false;
+            const send = client.send('qa_ack', { n: 2 }).then(() => { acked = true; }, () => {});
+            const id = await client.offlineQueue.at(-1).persistence;
+            const socket = goOnline(client);
+            client.processQueue().catch(() => {}); // el ACK lo controla el test
+            await waitFor(() => socket.sent.length === 1, 'emisión al socket');
+            const pending = await readMessages(ctx.dbName);
+            assert(pending.length === 1 && pending[0].id === id, 'sin ACK el mensaje debe seguir almacenado');
+            socket.sent[0].ack({ meta: { success: true }, data: { ok: 2 } });
+            await waitFor(async () => (await readMessages(ctx.dbName)).length === 0, 'borrado tras el ACK');
+            assert(acked, 'el envío debe resolverse con el ACK');
+            await send;
+        }
+
+        async function reloadOnlyUnconfirmed(ctx) {
+            const writer = ctx.newClient();
+            writer.send('qa_reload', { n: 1 }).catch(() => {});
+            writer.send('qa_reload', { n: 2 }).catch(() => {});
+            await waitFor(async () => (await readMessages(ctx.dbName)).length === 2, 'dos filas persistidas');
+            writer.db.close(); // cerrar la conexión antes de recrear
+
+            const loader = ctx.newClient({ timeout: ACK_TIMEOUT_MS });
+            await loader.dbReady;
+            const socket = goOnline(loader);
+            const queueDone = loader.processQueue().catch(() => {});
+            let handled = 0;
+            while (handled < 2) {
+                await waitFor(() => socket.sent.length > handled, `emisión ${handled + 1}`);
+                const sent = socket.sent[handled++];
+                if (sent.message.data.n === 2) continue; // sin ACK: cae por timeout de transporte
+                sent.ack({ meta: { success: true }, data: { ok: sent.message.data.n } });
+            }
+            await queueDone;
+            await waitFor(async () => (await readMessages(ctx.dbName)).length === 1, 'queda solo el no confirmado');
+            const rows = await readMessages(ctx.dbName);
+            loader.db.close(); // cerrar la conexión antes de recrear
+
+            const reloader = ctx.newClient();
+            await reloader.dbReady;
+            assert(reloader.offlineQueue.length === 1 && reloader.offlineQueue[0].data.n === 2, 'solo debe recargarse el no confirmado');
+            assert(reloader.offlineQueue[0].persistedId === rows[0].id, 'el mensaje cargado debe exponer persistedId de su fila');
+        }
+
+        async function transportTimeoutKeepsPending(ctx) {
+            const client = ctx.newClient({ timeout: ACK_TIMEOUT_MS });
+            const rejection = expectRejection(client.send('qa_timeout', { n: 4 }), 'el envío sin ACK');
+            const id = await client.offlineQueue.at(-1).persistence;
+            const socket = goOnline(client);
+            client.processQueue().catch(() => {});
+            await rejection;
+            await new Promise((resolve) => setTimeout(resolve, 50)); // margen para borrados tardíos
+            const rows = await readMessages(ctx.dbName);
+            assert(rows.length === 1 && rows[0].id === id, 'el timeout sin ACK no debe borrar el pendiente');
+            assert(socket.sent.length === 1, 'el mensaje debe haberse emitido una sola vez');
+        }
+
+        async function confirmedDeleteKeepsOtherInstanceMessage(ctx) {
+            const first = ctx.newClient();
+            const second = ctx.newClient();
+            await first.dbReady;
+            await second.dbReady;
+            const firstSend = first.send('qa_shared', { n: 'A' });
+            second.send('qa_shared', { n: 'B' }).catch(() => {}); // segunda instancia offline a propósito
+            const secondId = await second.offlineQueue.at(-1).persistence;
+            await waitFor(async () => (await readMessages(ctx.dbName)).length === 2, 'dos filas de dos instancias');
+            const socket = goOnline(first);
+            const queueDone = first.processQueue().catch(() => {});
+            await waitFor(() => socket.sent.length === 1, 'emisión de la primera instancia');
+            assert(socket.sent[0].message.data.n === 'A', 'la primera instancia solo debe emitir su mensaje');
+            socket.sent[0].ack({ meta: { success: true }, data: { ok: 'A' } });
+            await waitFor(async () => (await readMessages(ctx.dbName)).length === 1, 'borrado por ID confirmado');
+            const rows = await readMessages(ctx.dbName);
+            assert(rows[0].id === secondId && rows[0].data.n === 'B', 'no debe limpiarse el mensaje de la otra instancia');
+            await queueDone;
+            await firstSend;
+        }
+
+        async function abortedSaveIsNotConfirmed(ctx) {
+            const client = ctx.newClient();
+            await client.dbReady;
+            abortMessagesWriteOnAddSuccess(client.db);
+            const send = client.send('qa_abort', { n: 6 });
+            const sendCheck = expectRejection(send, 'el envío');
+            await expectRejection(client.offlineQueue.at(-1).persistence, 'persistence');
+            const socket = goOnline(client);
+            await client.processQueue(); // nada debe salir: el guardado no se confirmó
+            assert(socket.sent.length === 0, 'no debe emitirse nada si el guardado aborta');
+            assert((await readMessages(ctx.dbName)).length === 0, 'la transacción abortada no debe dejar filas');
+            await sendCheck;
+        }
+
+        async function reliableOutboxEpochLifecycle(ctx) {
+            const client = ctx.newClient({ reliable: { enabled: true, id: RELIABLE_ID } });
+            assert(client.socket === null && client.isConnected === false, 'todavía no debe haber handshake');
+            assert(client.reliableServerEpoch === null && client.reliableOutboundEpoch === undefined, 'sin epoch de servidor');
+
+            client.send('qa_epoch_enqueue', { n: 1 }).catch(() => {}); // nunca se conecta: queda en el outbox
+            await waitFor(() => client.reliableOutbox.size === 1, 'registro persistido en el outbox');
+            const [record] = [...client.reliableOutbox.values()];
+            assert(record.seq === 1 && record.meta.stream === RELIABLE_ID && record.meta.type === 'qa_epoch_enqueue', 'el outbox debe guardar seq 1 con su stream');
+            assert(client.nextReliableOutboundSeq === 2, 'el próximo seq debe quedar en 2');
+            const outboxRows = await readStore(ctx.dbName, OUTBOX_STORE);
+            assert(outboxRows.length === 1 && outboxRows[0].seq === 1, 'la fila del outbox debe existir antes del handshake');
+            const enqueued = expectRow(await readStore(ctx.dbName, METADATA_STORE), (row) => row.key.startsWith(OUTBOUND_SEQUENCE_PREFIX), 'secuencia de salida');
+            assert(enqueued.nextSeq === 2 && enqueued.epoch === undefined, 'sin handshake el epoch sigue indefinido');
+
+            await client._adoptReliableServerSequence(1, 'A'); // epoch A con pendientes
+            assert(client.nextReliableOutboundSeq === 2 && client.reliableOutboundEpoch === 'A', 'adoptar A con pendientes no debe cambiar el seq');
+            const adopted = expectRow(await readStore(ctx.dbName, METADATA_STORE), (row) => row.key.startsWith(OUTBOUND_SEQUENCE_PREFIX), 'secuencia adoptada');
+            assert(adopted.nextSeq === 2 && adopted.epoch === 'A', 'el epoch A debe persistirse con la secuencia pendiente');
+
+            client.db.close(); // cerrar la conexión antes de recrear
+            const reloaded = ctx.newClient({ reliable: { enabled: true, id: RELIABLE_ID } });
+            await reloaded.reliableOutboxReady;
+            assert(reloaded.reliableOutbox.size === 1 && reloaded.nextReliableOutboundSeq === 2, 'el outbox debe sobrevivir a la recreación');
+            assert(reloaded.reliableOutboundEpoch === 'A', 'el epoch A debe sobrevivir a la recreación');
+
+            await expectResync(reloaded._adoptReliableServerSequence(1, 'B'), 'adoptar B con pendientes');
+            assert(reloaded.reliableOutbox.size === 1 && reloaded.nextReliableOutboundSeq === 2 && reloaded.reliableOutboundEpoch === 'A', 'el rechazo debe retener outbox y epoch A');
+            const afterRejection = expectRow(await readStore(ctx.dbName, METADATA_STORE), (row) => row.key.startsWith(OUTBOUND_SEQUENCE_PREFIX), 'secuencia tras el rechazo');
+            assert(afterRejection.nextSeq === 2 && afterRejection.epoch === 'A', 'el rechazo no debe reescribir la secuencia');
+
+            const [pending] = [...reloaded.reliableOutbox.values()];
+            await reloaded._deleteReliableOutboundRecord(pending); // pendiente borrado/confirmado
+            await reloaded._adoptReliableServerSequence(1, 'B');
+            assert(reloaded.reliableOutbox.size === 0 && reloaded.nextReliableOutboundSeq === 1 && reloaded.reliableOutboundEpoch === 'B', 'sin pendientes B debe adoptar la secuencia del servidor');
+
+            reloaded.db.close(); // cerrar la conexión antes de recrear
+            const finalClient = ctx.newClient({ reliable: { enabled: true, id: RELIABLE_ID } });
+            await finalClient.reliableOutboxReady;
+            assert(finalClient.reliableOutbox.size === 0 && finalClient.nextReliableOutboundSeq === 1, 'el outbox debe quedar vacío en la siguiente recreación');
+            assert(finalClient.reliableOutboundEpoch === 'B', 'B debe persistirse en la siguiente recreación');
+        }
+
+        async function reliableCursorEpochUntilExplicitJoin(ctx) {
+            const room = 'qa-epoch-room';
+            const writer = ctx.newClient({ reliable: { enabled: true, id: RELIABLE_ID } });
+            await writer.reliableOutboxReady;
+            writer.reliableServerEpoch = 'A'; // como lo deja el handshake sx_reliable_ready
+            goOnline(writer);
+            writer.onMessage('qa_epoch_room', () => {});
+            await writer._prepareReliableRoom(room);
+            writer._handleReliableMessage({ meta: { type: 'qa_epoch_room', id: 'epoch-evt-1', stream: room, seq: 58 } });
+            await writer.reliableRooms.get(room).processing;
+            const saved = expectRow(await readStore(ctx.dbName, CURSORS_STORE), (row) => row.key.endsWith(room), 'cursor del epoch A');
+            assert(saved.seq === 58 && saved.epoch === 'A', 'el cursor debe guardarse con el epoch A');
+            writer.db.close(); // cerrar la conexión antes de recrear
+
+            const reloaded = ctx.newClient({ reliable: { enabled: true, id: RELIABLE_ID } });
+            await reloaded.reliableOutboxReady;
+            reloaded.reliableServerEpoch = 'B'; // el servidor ahora anuncia otro epoch
+
+            const inherited = await reloaded._prepareReliableRoom(room);
+            assert(inherited.epoch === 'A' && inherited.lastSeq === 58, 'sin afterSeq debe conservarse el cursor del epoch A');
+
+            const explicit = await reloaded._prepareReliableRoom(room, 0);
+            assert(explicit.epoch === 'B' && explicit.lastSeq === 0, 'con afterSeq explícito debe usarse el epoch del servidor');
+
+            await reloaded._saveReliableCursor(room, 3); // toma el epoch del estado actual (B)
+            const replaced = expectRow(await readStore(ctx.dbName, CURSORS_STORE), (row) => row.key.endsWith(room), 'cursor reemplazado');
+            assert(replaced.seq === 3 && replaced.epoch === 'B', 'un seq menor con epoch B debe reemplazar el cursor A');
+        }
+
+        // ---------- ejecución ----------
+        const CASES = [
+            { id: 'offline-before-dbready', title: 'El envío offline antes de dbReady se persiste', run: offlineBeforeDbReady },
+            { id: 'keeps-until-ack', title: 'Sigue almacenado hasta el ACK y luego se elimina', run: keepsUntilAck },
+            { id: 'reload-unconfirmed', title: 'Al recrear el cliente se cargan solo los no confirmados', run: reloadOnlyUnconfirmed },
+            { id: 'transport-timeout-keeps-pending', title: 'El timeout sin ACK conserva el pendiente', run: transportTimeoutKeepsPending },
+            { id: 'delete-by-id-keeps-other-instance', title: 'El borrado por ID no limpia el mensaje de otra instancia', run: confirmedDeleteKeepsOtherInstanceMessage },
+            { id: 'aborted-save-not-confirmed', title: 'Abortar el guardado rechaza y no emite nada', run: abortedSaveIsNotConfirmed },
+            { id: 'reliable-outbox-epoch-lifecycle', title: 'El outbox reliable persiste epoch y secuencia entre recreaciones', run: reliableOutboxEpochLifecycle },
+            { id: 'reliable-cursor-epoch', title: 'El cursor reliable conserva su epoch hasta un afterSeq explícito', run: reliableCursorEpochUntilExplicitJoin }
+        ];
+        const resultsEl = document.getElementById('results'), summaryEl = document.getElementById('summary'), rerunButton = document.getElementById('rerun');
+        async function runAll() {
+            resultsEl.innerHTML = ''; summaryEl.className = ''; summaryEl.textContent = 'Ejecutando…'; rerunButton.disabled = true;
+            const cases = [];
+            window.testResults = { status: 'running', total: CASES.length, passed: 0, failed: 0, cases };
+            window.testsDone = false;
+            for (const definition of CASES) {
+                const dbName = `shotx-test-${definition.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                const clients = [];
+                const ctx = {
+                    dbName,
+                    newClient: (opts) => { const client = createTestClient(dbName, opts); clients.push(client); return client; }
+                };
+                const record = { id: definition.id, title: definition.title, status: 'running' };
+                cases.push(record);
+                try {
+                    await withTimeout(definition.run(ctx), definition.title);
+                    record.status = 'pass';
+                } catch (error) {
+                    record.status = 'fail';
+                    record.error = (error && error.message) || String(error);
+                } finally {
+                    for (const client of clients) { try { if (client.db) client.db.close(); } catch { /* ya estaba cerrada */ } }
+                    await deleteDb(dbName).catch(() => {}); // solo bases únicas de test
+                }
+                const item = document.createElement('li');
+                item.className = record.status;
+                item.textContent = `PASS · ${definition.title}`;
+                if (record.status === 'fail') item.textContent = `FAIL · ${definition.title} — ${record.error}`;
+                resultsEl.appendChild(item);
+            }
+            const passed = cases.filter((record) => record.status === 'pass').length;
+            const failed = cases.length - passed;
+            summaryEl.className = failed === 0 ? 'pass' : 'fail';
+            summaryEl.textContent = failed === 0 ? `PASS ${passed}/${cases.length}` : `FAIL · ${passed}/${cases.length} casos pasaron`;
+            Object.assign(window.testResults, { status: 'done', passed, failed });
+            window.testsDone = true;
+            rerunButton.disabled = false;
+        }
+        rerunButton.addEventListener('click', () => { runAll(); });
+        runAll();
+    </script>
+</body>
+</html>

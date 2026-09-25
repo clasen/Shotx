@@ -144,6 +144,7 @@ describe('Auth Flow', function () {
         ({ httpServer, sxServer, port } = await createTestServer());
         sxServer.setAuthHandler(async (token) => {
             if (token === 'valid') return { userId: 'user123' };
+            if (token === 'throws') throw new Error('Authentication unavailable');
             return null;
         });
     });
@@ -160,36 +161,15 @@ describe('Auth Flow', function () {
         client.disconnect();
     });
 
-    it('should fail with AUTH_FAIL for invalid token', async function () {
-        const client = createTestClient(port);
-        await assert.rejects(
-            () => client.connect('invalid', { timeout: 2000 }),
-            (err) => {
-                // Socket.IO wraps the auth error in connect_error
-                // The client retries until timeout
-                assert.ok(err.message.includes('TIMEOUT') || err.message.includes('AUTH_FAIL'));
-                return true;
-            }
-        );
-        client.disconnect();
-    });
+    for (const [token, error] of [['invalid', 'AUTH_FAIL'], ['', 'AUTH_NULL'], ['throws', 'AUTH_ERROR']]) {
+        it(`rejects connect with ${error} without a caller timeout`, { timeout: 2000 }, async function (t) {
+            const client = createTestClient(port);
+            t.after(() => client.disconnect());
+            await assert.rejects(() => client.connect(token), { message: error });
+            assert.strictEqual(client.isConnected, false);
+        });
+    }
 
-    it('should fail with AUTH_NULL for missing token', async function () {
-        // Connect with null token - client defaults to uuidv7 so we need
-        // a custom approach: use raw socket.io-client
-        const client = createTestClient(port);
-        // Force null token by passing null explicitly
-        await assert.rejects(
-            () => client.connect(null, { timeout: 2000 }),
-            (err) => {
-                // null gets replaced by uuidv7 in the client, so the auth handler
-                // will reject it (not 'valid'), causing AUTH_FAIL -> timeout
-                assert.ok(err.message.includes('TIMEOUT') || err.message.includes('AUTH'));
-                return true;
-            }
-        );
-        client.disconnect();
-    });
 });
 
 describe('Message Routing', function () {
@@ -244,6 +224,47 @@ describe('Message Routing', function () {
             const result = await client.send('test_route', { count: i });
             assert.strictEqual(result.echo.count, i);
             assert.strictEqual(result.status, 'ok');
+        }
+    });
+
+    it('should process messages emitted without an ACK callback', async function () {
+        const { io } = await import('socket.io-client');
+        const handled = [];
+        sxServer.onMessage('no_ack_route', async (data) => {
+            handled.push(data);
+            return { ok: true };
+        });
+
+        const rejections = [];
+        const onRejection = (reason) => rejections.push(reason);
+        process.on('unhandledRejection', onRejection);
+
+        const raw = io(`http://localhost:${port}`, {
+            reconnection: false,
+            path: '/shotx/',
+            auth: { token: 'any-token' }
+        });
+
+        try {
+            await new Promise((resolve, reject) => {
+                raw.on('connect', resolve);
+                raw.on('connect_error', reject);
+            });
+
+            // Valid message without ACK: the handler must still run.
+            raw.emit('message', { meta: { type: 'no_ack_route' }, data: { hello: 'no-ack' } });
+            // Invalid message without ACK: there is no ACK to report the error on.
+            raw.emit('message', 'not-an-object');
+
+            await waitFor(() => handled.length === 1);
+
+            // The server and the existing connection must keep working.
+            const result = await client.send('test_route', { after: 'no-ack' });
+            assert.deepStrictEqual(result, { echo: { after: 'no-ack' }, status: 'ok' });
+            assert.deepStrictEqual(rejections, []);
+        } finally {
+            process.off('unhandledRejection', onRejection);
+            raw.disconnect();
         }
     });
 });
@@ -425,6 +446,62 @@ describe('Offline Queue', function () {
 
         client.disconnect();
     });
+
+    it('should keep a persisted message until its ACK and delete only that message', async function () {
+        const client = createTestClient(port);
+        client.useIndexedDB = true;
+
+        // Minimal storage stub: stable IDs and a spy for deletions.
+        const persisted = new Map();
+        let nextId = 1;
+        client._saveMessageToIndexedDB = async (message) => {
+            const id = nextId++;
+            persisted.set(id, message);
+            return id;
+        };
+        const deletedIds = [];
+        client._deletePersistedMessage = async (id) => {
+            deletedIds.push(id);
+            persisted.delete(id);
+        };
+
+        let releaseHandler;
+        const handlerRelease = new Promise((resolve) => { releaseHandler = resolve; });
+        let markHandlerStarted;
+        const handlerStarted = new Promise((resolve) => { markHandlerStarted = resolve; });
+        sxServer.onMessage('slow_queued_route', async (data) => {
+            markHandlerStarted();
+            await handlerRelease;
+            return { received: data };
+        });
+
+        const firstSend = client.send('slow_queued_route', { msg: 'first' });
+        await waitFor(() => persisted.size === 1);
+        const firstId = [...persisted.keys()][0];
+
+        try {
+            // Connecting must not wait for the delayed ACK.
+            await client.connect('token');
+            await handlerStarted;
+
+            // The handler is still waiting, so the persisted message must survive.
+            assert.strictEqual(persisted.has(firstId), true);
+            assert.deepStrictEqual(deletedIds, []);
+
+            // A second instance left its own pending message in the same storage.
+            persisted.set(99, { eventName: 'queued_route', data: { msg: 'other' }, meta: {} });
+
+            releaseHandler();
+            assert.deepStrictEqual(await firstSend, { received: { msg: 'first' } });
+
+            assert.deepStrictEqual(deletedIds, [firstId]);
+            assert.deepStrictEqual([...persisted.keys()], [99]);
+            assert.strictEqual(client.offlineQueue.length, 0);
+        } finally {
+            releaseHandler();
+            client.disconnect();
+        }
+    });
 });
 
 describe('Rooms', function () {
@@ -531,7 +608,8 @@ describe('Reliable delivery', function () {
         enabled: true,
         retentionMs: 60_000,
         maxMessagesPerRoom: 100,
-        identity: () => 'test-principal'
+        identity: () => 'test-principal',
+        storage: 'disk'
     };
 
     const createReliableClient = (port, id) => createTestClient(
@@ -671,7 +749,7 @@ describe('Reliable delivery', function () {
 
     it('enables reliable delivery only from server to client', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
-            reliable: { enabled: true }
+            reliable: { enabled: true, storage: 'disk' }
         });
         const room = `server-to-client-only-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const client = createTestClient(port);
@@ -852,7 +930,8 @@ describe('Reliable delivery', function () {
             enabled: true,
             retentionMs: 24 * 60 * 60 * 1000,
             maxMessagesPerRoom: 10_000,
-            identity: null
+            identity: null,
+            storage: 'memory'
         });
         assert.throws(
             () => new SxServer(invalidHttpServer, {}, {
@@ -932,9 +1011,9 @@ describe('Reliable delivery', function () {
         });
         let connected = false;
 
-        client._adoptReliableServerSequence = async (nextSeq) => {
+        client._adoptReliableServerSequence = async (...args) => {
             await negotiationBlocked;
-            await adoptServerSequence(nextSeq);
+            await adoptServerSequence(...args);
         };
         const connection = client.connect('token').then(() => {
             connected = true;
@@ -1163,6 +1242,66 @@ describe('Reliable delivery', function () {
 
         await sxServer.db.del('sxReliableRooms', room);
         await cleanup(httpServer, client);
+    });
+
+    it('reports an expired room on automatic reconnect and restores the other rooms', async function () {
+        const { httpServer, sxServer, port } = await createTestServer({}, {
+            reliable: { ...reliable, maxMessagesPerRoom: 2 }
+        });
+        const room = `expired-reconnect-${Date.now()}`;
+        const otherRoom = `${room}-other`;
+        const client = createTestClient(port, {
+            reconnection: true,
+            reconnectionDelay: 10,
+            reconnectionDelayMax: 10,
+            randomizationFactor: 0
+        });
+        const received = [];
+        const notifications = [];
+        let releaseAuth;
+        let reconnecting;
+        const reconnectStarted = new Promise((resolve) => { reconnecting = resolve; });
+        const authBlocked = new Promise((resolve) => { releaseAuth = resolve; });
+
+        try {
+            await client.connect('token');
+            client.onMessage('event', (data) => received.push(data));
+            client.onMessage('sx_resync_required', (details) => notifications.push(details));
+            await client.join(room);
+            await client.join(otherRoom);
+            await sxServer.to(room).send('event', 1);
+            await waitFor(() => received.length === 1);
+
+            sxServer.setAuthHandler(async () => {
+                reconnecting();
+                await authBlocked;
+                return {};
+            });
+            [...sxServer.io.sockets.sockets.values()][0].conn.close();
+            await reconnectStarted;
+            for (const number of [2, 3, 4]) await sxServer.to(room).send('event', number);
+            await sxServer.to(otherRoom).send('event', 'recovered');
+            releaseAuth();
+
+            await waitFor(() => notifications.length === 1 && received.includes('recovered'));
+            assert.strictEqual(notifications[0].room, room);
+            assert.strictEqual(notifications[0].reason, 'cursor_expired');
+            assert.strictEqual(client.joinedRooms.has(room), false);
+            assert.strictEqual(client.joinedRooms.has(otherRoom), true);
+            const socket = [...sxServer.io.sockets.sockets.values()][0];
+            assert.strictEqual(socket.rooms.has(room), false);
+            assert.strictEqual(socket.rooms.has(otherRoom), true);
+            assert.deepStrictEqual(received, [1, 'recovered']);
+
+            await client.join(room, { afterSeq: 2 });
+            await waitFor(() => received.length === 4);
+            assert.deepStrictEqual(received, [1, 'recovered', 3, 4]);
+        } finally {
+            releaseAuth();
+            await sxServer.db.del('sxReliableRooms', room);
+            await sxServer.db.del('sxReliableRooms', otherRoom);
+            await cleanup(httpServer, client);
+        }
     });
 
     it('stops a live stream when a detected gap is no longer retained', async function () {

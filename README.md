@@ -172,6 +172,19 @@ await client.join('user-room');
 
 With only the server enabled, delivery is reliable only from server to client. With only the client enabled, delivery is reliable only from client to server. The server retains messages and cached acknowledgements for 24 hours, up to 10,000 entries per stream, unless `retentionMs` or `maxMessagesPerRoom` overrides those defaults.
 
+Server reliable history uses memory by default (`storage: 'memory'`), avoiding database reads and writes for room messages and cached client responses. Reconnection can replay this history while the same server instance is alive. To retain it across server restarts, select disk storage explicitly:
+
+```javascript
+const sxServer = new SxServer(server, {}, {
+    path: resolve(import.meta.dirname, 'db'),
+    reliable: { enabled: true, storage: 'disk' }
+});
+```
+
+`storage` controls both room history and cached client responses, including when only clients enable reliable sending. Disk storage saves messages before emission and responses before acknowledgement. Memory storage ignores existing reliable disk history without deleting it. `path` remains required for the existing offline-room persistence; browser IndexedDB storage is independent of this server option.
+
+Recreating a memory server starts a new history. Clients with previous room cursors report `RELIABLE_RESYNC_REQUIRED` with reason `server_restarted` instead of silently skipping messages with reused sequence numbers. After reconciling application state, call `join(room, { afterSeq: 0 })` to consume the new retained history. Outbound clients with no pending messages adopt the new sequence automatically; those with unacknowledged commands report `RELIABLE_RESYNC_REQUIRED` and retain their outbox for application reconciliation, because replaying against a new history could repeat an already executed command.
+
 In browsers, Shotx generates a UUIDv7 client ID and persists it in IndexedDB by server URL. An explicit, non-secret ID overrides the generated one when separate logical consumers are needed:
 
 ```javascript
@@ -182,11 +195,11 @@ const client = new SxClient('http://localhost:3000', {}, {
 
 For server-to-client delivery, the cursor advances only after the client message handler resolves. A new consumer without a saved cursor receives the currently retained room history. Non-browser consumers can restore a durable cursor explicitly with `join(room, { afterSeq })`.
 
-For client-to-server delivery, the client persists each application message before sending it. The server processes messages in sequence and persists the handler response before acknowledging them. If the connection closes after the handler runs but before the acknowledgement arrives, the client resends the same UUIDv7 and sequence; the server returns the stored response without running the handler again. Internal Shotx control messages are not part of the application sequence.
+For client-to-server delivery, the client retains each application message before sending it, using IndexedDB in browsers and memory in Node.js. The server processes messages in sequence and retains the handler response in the selected storage before acknowledging them. If the connection closes after the handler runs but before the acknowledgement arrives, the client resends the same UUIDv7 and sequence; while that history is retained, the server returns the stored response without running the handler again. Internal Shotx control messages are not part of the application sequence.
 
 Each logical consumer tracks a broadcast room independently; one consumer's progress never acknowledges messages for another. Browser clients using the generated ID share one logical installation per server URL. Broadcast subscribers and authenticated users that must advance independently should configure distinct `reliable.id` values. A server can additionally provide `reliable.identity(auth, socket)` to scope client sequences by authenticated principal even when its own `enabled` flag is `false`. The identity must be stable and non-secret; never use or persist the authentication token itself. In Node.js, an explicit ID lets a recreated client adopt the server's next sequence when no messages are pending, but the in-memory outbox does not survive a process crash. If a cursor falls outside retained history, Shotx reports `RELIABLE_RESYNC_REQUIRED`; normal gaps inside retention are replayed transparently.
 
-Reliable delivery provides ordered at-least-once transport with deduplication inside the configured retention window. It cannot make arbitrary external side effects exactly-once across a process crash; handlers that call an external system should pass `meta.id` as that system's idempotency key. Reliable storage currently requires a single `SxServer` writer for the DeepBase file. Multi-process deployments need a shared transactional sequence, inbox, and room log store.
+Reliable delivery provides ordered at-least-once transport with deduplication while history remains available inside the configured retention window. It cannot make arbitrary external side effects exactly-once across a process crash; handlers that call an external system should pass `meta.id` as that system's idempotency key. Disk storage requires a single `SxServer` writer for the DeepBase file. Memory history belongs to one server instance, so reconnecting clients must return to that instance to replay it. Multi-process deployments need a shared transactional sequence, inbox, and room log store.
 
 ## API Documentation
 
@@ -203,7 +216,7 @@ new SxServer(server, opts, { path, auto404, debug, reliable })
 - `path` (required): Absolute directory where Shotx stores its DeepBase `shotx.json` file.
 - `auto404` (optional): Automatically respond with 404 to non-Shotx HTTP requests. Defaults to `true`.
 - `debug` (optional): Log level for the server instance. Defaults to `'none'`. See [Logging](#logging).
-- `reliable` (optional): Reliable configuration for messages sent by this server. `enabled` defaults to `false`. `retentionMs` defaults to 24 hours and `maxMessagesPerRoom` defaults to 10,000; both also govern cached responses for reliable clients. Optional `identity(auth, socket)` scopes incoming client sequences by authenticated principal.
+- `reliable` (optional): Reliable configuration for messages sent by this server. `enabled` defaults to `false`. `storage` accepts `'memory'` (default) or `'disk'` and applies to room history and cached client responses. `retentionMs` defaults to 24 hours and `maxMessagesPerRoom` defaults to 10,000; both also govern cached responses for reliable clients. Optional `identity(auth, socket)` scopes incoming client sequences by authenticated principal.
 
 **Methods**
 
@@ -214,7 +227,7 @@ new SxServer(server, opts, { path, auto404, debug, reliable })
   Register a handler for a given message type. When a message with a matching type is received, the provided handler function is invoked with `(data, socket, meta)` parameters.
 
 - **to(room: string): Object**  
-  Returns an object with the existing `send` method. When reliable delivery is enabled on the server, `send` returns a promise and persists a sequenced message before emitting it. Otherwise, it retains the legacy offline-room behavior.
+  Returns an object with the existing `send` method. When reliable delivery is enabled on the server, `send` returns a promise and retains a sequenced message in the selected storage before emitting it. Otherwise, it retains the legacy offline-room behavior.
 
 - **setupListeners()**  
   Automatically configures event listeners for client connection, message reception, disconnection, and error handling. Called automatically in constructor.
@@ -226,7 +239,7 @@ new SxServer(server, opts, { path, auto404, debug, reliable })
 - `sx_join`: Handles room joining (automatically registered)
 - `sx_leave`: Handles room leaving (automatically registered)
 - `sx_replay`: Replays reliable room messages from a requested sequence (automatically used by the client)
-- `sx_reliable_ready`: Announces the server-side client sequence when the connecting client enables reliable delivery (automatically used by the client)
+- `sx_reliable_ready`: Announces the reliable history identity and, for clients that enable reliable sending, their next outbound sequence (automatically used by the client)
 
 ### SxClient
 
