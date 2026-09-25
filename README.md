@@ -201,6 +201,20 @@ Each logical consumer tracks a broadcast room independently; one consumer's prog
 
 Reliable delivery provides ordered at-least-once transport with deduplication while history remains available inside the configured retention window. It cannot make arbitrary external side effects exactly-once across a process crash; handlers that call an external system should pass `meta.id` as that system's idempotency key. Disk storage requires a single `SxServer` writer for the DeepBase file. Memory history belongs to one server instance, so reconnecting clients must return to that instance to replay it. Multi-process deployments need a shared transactional sequence, inbox, and room log store.
 
+## Benchmark
+
+Run `pnpm benchmark` to compare normal delivery, reliable delivery with memory storage, and reliable delivery with disk storage. The benchmark uses 20 WebSocket clients, 4,000 request/response messages and 4,000 room deliveries per mode and round, a 256-byte payload, and three rounds. One process hosts the server and clients over loopback. Requests have one outstanding message per client; room deliveries use a burst to one room.
+
+Results from Node.js 22.23.2 on an Apple M4 Max (median of three rounds):
+
+| Mode | Requests with ACK/s | ACK latency p95 | Room deliveries/s |
+| --- | ---: | ---: | ---: |
+| Normal | 39,349 | 0.70 ms | 238,852 |
+| Reliable, memory | 33,676 | 0.87 ms | 211,538 |
+| Reliable, disk | 1,195 | 28.13 ms | 2,613 |
+
+With this workload, reliable memory delivered about 81 times as many room messages per second as reliable disk. Disk uses the DeepBase JSON driver, which rewrites its growing store on commits; these numbers are specific to this local workload, not a steady-state or crash-durability measurement.
+
 ## API Documentation
 
 ### SxServer
