@@ -1,0 +1,19 @@
+{
+  "name": "com.clasen.shotx",
+  "version": "0.1.0",
+  "displayName": "Shotx Client",
+  "description": "Unity client for Shotx real-time servers: token authentication, acknowledged messages, rooms, and offline queuing over Socket.IO.",
+  "unity": "2021.3",
+  "license": "MIT",
+  "author": {
+    "name": "Martin Clasen"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clasen/Shotx.git",
+    "directory": "packages/shotx-unity"
+  },
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  }
+}

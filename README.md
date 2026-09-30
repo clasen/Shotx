@@ -15,6 +15,85 @@ Shotx features built-in token-based authentication, asynchronous message handlin
 - **Timeouts**: Configurable timeouts for connection and messages, with global defaults and per-call overrides.
 
 
+## Repository layout
+
+This monorepo distributes two independent packages:
+
+- `packages/shotx`: the npm package (`shotx`, `shotx/client`, `shotx/server`).
+- `packages/shotx-unity`: the UPM package (`com.clasen.shotx`), including its SocketIOClient DLLs.
+- `tests/js` and `tests/dotnet`: JavaScript and C# integration tests.
+- `demo` and `benchmark`: development tools, not published to npm.
+
+From the repository root, run `pnpm install --frozen-lockfile`, then:
+
+```bash
+pnpm test                 # JavaScript tests, including stress tests
+pnpm test:unity           # C# integration tests; requires .NET SDK 9 and Node.js
+pnpm build:unity-deps     # Regenerate bundled DLLs and third-party notices
+pnpm pack:npm             # Package only the npm distribution
+```
+
+The dependency generator uses `tests/dotnet/packages.lock.json` in locked mode. It bundles the NuGet runtime assemblies except those supplied by Unity's .NET Standard 2.1 profile and Newtonsoft (supplied by UPM). Generated DLLs, Unity metadata and third-party licenses are checked in so installing the Unity package requires no .NET SDK or NuGetForUnity. To intentionally change versions, edit `tests/dotnet/Shotx.csproj`, run `dotnet restore tests/dotnet/Shotx.csproj --force-evaluate`, then regenerate and verify the package in Unity.
+
+The root package is private. Run `pnpm pack:npm`, then publish the resulting `shotx-<version>.tgz` with `npm publish`. The npm package's explicit `files` list excludes Unity, tests and development tooling. The pack command prepares this README explicitly, even when npm lifecycle scripts are disabled; the package also has a prepack hook for publishing directly from `packages/shotx`.
+
+## Unity client
+
+In Unity Package Manager, choose **Add package from git URL** and enter:
+
+```text
+https://github.com/clasen/Shotx.git?path=/packages/shotx-unity
+```
+
+For local development, choose **Add package from disk** and select `packages/shotx-unity/package.json`. SocketIOClient and its required DLLs are included; UPM installs Newtonsoft automatically. No manual dependency installation is needed. Do not install a second copy of these DLLs in `Assets`.
+
+The client targets Unity 2021.3+ with .NET Standard 2.1; verification has been performed in Unity 6. WebGL is excluded. It supports authentication, request/response messaging, rooms, reconnection, an in-memory offline queue and the reliable delivery protocol described below.
+
+```csharp
+using Shotx;
+using UnityEngine;
+
+public class ShotxConnection : MonoBehaviour
+{
+    private SxClient client;
+
+    private async void Start()
+    {
+        client = new SxClient("http://localhost:3000");
+        client.OnMessage("notification", (data, meta) => Debug.Log(data));
+        try
+        {
+            var auth = await client.Connect("valid");
+            await client.Join("user1");
+            var response = await client.Send("test_route", new { count = 1 });
+            Debug.Log(response);
+        }
+        catch (System.Exception error)
+        {
+            Debug.LogException(error);
+        }
+    }
+
+    private void OnDestroy() => client?.Dispose();
+}
+```
+
+Construct the client on the Unity main thread to dispatch message handlers there. `OnMessage` receives `(data, meta)` and can be registered before connecting. `Connect`, `Send`, `Join`, `Leave` and `Disconnect` return Tasks. `Connect` and `Send` accept an optional `TimeSpan` timeout; `SxClientOptions.Timeout` sets the default (`TimeSpan.Zero` waits indefinitely). Server failures throw `SxException` with a string `Code`; timeouts throw `TimeoutException`.
+
+Reliable delivery follows the same protocol as the JavaScript client. Receiving reliable room messages is automatic: handlers run one at a time in sequence order, and the room cursor advances only after a handler completes without throwing. A failed message is retried, before later ones, when the room next receives a message or a handler is registered. Enable reliable sending with `SxClientOptions.Reliable`:
+
+```csharp
+var client = new SxClient("https://example.com", new SxClientOptions
+{
+    Reliable = new SxReliableOptions { Enabled = true, Id = "user-123-device-1" }
+});
+client.OnMessage("sx_resync_required", (data, meta) => Debug.LogWarning(data));
+```
+
+Identity, room cursors and the outbound outbox are written atomically to a JSON file under `Application.persistentDataPath`, one per server URL and `Id`. Pending messages therefore survive an application restart and are resent with their original sequence and ID. `StatePath` selects another file; outside Unity, omitting it keeps the state in memory. Only one live `SxClient` may use a state file, so dispose the previous client before creating another with the same URL and `Id`. `Join(room, afterSeq)` restores a cursor explicitly. When a cursor is outside retained history, `Join` throws `SxException` `RELIABLE_RESYNC_REQUIRED` with `Details` (`room`, `reason`, `earliestSeq`, `latestSeq`); a room rejoined after reconnection reports the same details to the `sx_resync_required` handler. A permanent outbound failure, such as `RELIABLE_RESYNC_REQUIRED` or `RELIABLE_SEQUENCE_CONFLICT`, fails pending and later reliable sends for that client instance.
+
+Handlers are dispatched through the context captured at construction; message order is preserved when that context runs posted callbacks in order, as Unity's main-thread context does.
+
 ## Usage
 
 ### Browser close/reopen persistence test

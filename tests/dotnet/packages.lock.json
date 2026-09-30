@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "dependencies": {
+    ".NETStandard,Version=v2.1": {
+      "SocketIO.Serializer.NewtonsoftJson": {
+        "type": "Direct",
+        "requested": "[3.1.2, )",
+        "resolved": "3.1.2",
+        "contentHash": "vTCbbPo3UOC3KOma1VqNkZg33A/Y14ZHWT0y3JP65BWTmJN9B2NdeA1mkPkncponq6UkdszMobJ5WXHIOkvqtg==",
+        "dependencies": {
+          "Newtonsoft.Json": "13.0.3",
+          "SocketIO.Core": "3.1.2",
+          "SocketIO.Serializer.Core": "3.1.2"
+        }
+      },
+      "SocketIOClient": {
+        "type": "Direct",
+        "requested": "[3.1.2, )",
+        "resolved": "3.1.2",
+        "contentHash": "CMmnmhvG1Qf8k6BPh3RLqc/9MNvGUlCOyptjoP8a62bowPQkHTWvN25yy+gQqx5Ry/NgzkQHBJNpmRJhZNZrVQ==",
+        "dependencies": {
+          "SocketIO.Serializer.Core": "3.1.2",
+          "SocketIO.Serializer.SystemTextJson": "3.1.2"
+        }
+      },
+      "Microsoft.Bcl.AsyncInterfaces": {
+        "type": "Transitive",
+        "resolved": "8.0.0",
+        "contentHash": "3WA9q9yVqJp222P3x1wYIGDAkpjAku0TMUaaQV22g6L67AI0LdOIrVS7Ht2vJfLHGSPVuqN94vIr15qn+HEkHw=="
+      },
+      "Newtonsoft.Json": {
+        "type": "Transitive",
+        "resolved": "13.0.3",
+        "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
+      },
+      "SocketIO.Core": {
+        "type": "Transitive",
+        "resolved": "3.1.2",
+        "contentHash": "tb6vZ7DYhZooRGLHTPK7/Gifbu+kHbkQRbsee0LAnI28pWc5+Br+juh4pvid3kfIrGTl5dzAfy5huLELVU4svA=="
+      },
+      "SocketIO.Serializer.Core": {
+        "type": "Transitive",
+        "resolved": "3.1.2",
+        "contentHash": "/cJtU3JVzjqP/Jh3BpMMR0aNzYua6s9e3+hjZ6OnYprFHrGYyg/n9OcST1dBjmOvvgyJ3GwJlyq0NjnPETAHsA==",
+        "dependencies": {
+          "SocketIO.Core": "3.1.2"
+        }
+      },
+      "SocketIO.Serializer.SystemTextJson": {
+        "type": "Transitive",
+        "resolved": "3.1.2",
+        "contentHash": "AA8w3Y4JldC3FaL1D4WuyG4zLPdrzjf8AQx1LCKtzlMlTLOcbEW0UGt+BhKxkUnxYAD5O5fsqRrTNCGXu6VeWA==",
+        "dependencies": {
+          "SocketIO.Core": "3.1.2",
+          "SocketIO.Serializer.Core": "3.1.2",
+          "System.Text.Json": "8.0.4"
+        }
+      },
+      "System.Buffers": {
+        "type": "Transitive",
+        "resolved": "4.5.1",
+        "contentHash": "Rw7ijyl1qqRS0YQD/WycNst8hUUMgrMH4FCn1nNm27M4VxchZ1js3fVjQaANHO5f3sN4isvP4a+Met9Y4YomAg=="
+      },
+      "System.Memory": {
+        "type": "Transitive",
+        "resolved": "4.5.5",
+        "contentHash": "XIWiDvKPXaTveaB7HVganDlOCRoj03l+jrwNvcge/t8vhGYKvqV+dMv6G4SAX2NoNmN0wZfVPTAlFwZcZvVOUw==",
+        "dependencies": {
+          "System.Buffers": "4.5.1",
+          "System.Numerics.Vectors": "4.4.0",
+          "System.Runtime.CompilerServices.Unsafe": "4.5.3"
+        }
+      },
+      "System.Numerics.Vectors": {
+        "type": "Transitive",
+        "resolved": "4.4.0",
+        "contentHash": "UiLzLW+Lw6HLed1Hcg+8jSRttrbuXv7DANVj0DkL9g6EnnzbL75EB7EWsw5uRbhxd/4YdG8li5XizGWepmG3PQ=="
+      },
+      "System.Runtime.CompilerServices.Unsafe": {
+        "type": "Transitive",
+        "resolved": "6.0.0",
+        "contentHash": "/iUeP3tq1S0XdNNoMz5C9twLSrM/TH+qElHkXWaPvuNOt+99G75NrV0OS2EqHx5wMN7popYjpc8oTjC1y16DLg=="
+      },
+      "System.Text.Encodings.Web": {
+        "type": "Transitive",
+        "resolved": "8.0.0",
+        "contentHash": "yev/k9GHAEGx2Rg3/tU6MQh4HGBXJs70y7j1LaM1i/ER9po+6nnQ6RRqTJn1E7Xu0fbIFK80Nh5EoODxrbxwBQ==",
+        "dependencies": {
+          "System.Buffers": "4.5.1",
+          "System.Memory": "4.5.5",
+          "System.Runtime.CompilerServices.Unsafe": "6.0.0"
+        }
+      },
+      "System.Text.Json": {
+        "type": "Transitive",
+        "resolved": "8.0.4",
+        "contentHash": "bAkhgDJ88XTsqczoxEMliSrpijKZHhbJQldhAmObj/RbrN3sU5dcokuXmWJWsdQAhiMJ9bTayWsL1C9fbbCRhw==",
+        "dependencies": {
+          "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
+          "System.Buffers": "4.5.1",
+          "System.Memory": "4.5.5",
+          "System.Runtime.CompilerServices.Unsafe": "6.0.0",
+          "System.Text.Encodings.Web": "8.0.0",
+          "System.Threading.Tasks.Extensions": "4.5.4"
+        }
+      },
+      "System.Threading.Tasks.Extensions": {
+        "type": "Transitive",
+        "resolved": "4.5.4",
+        "contentHash": "zteT+G8xuGu6mS+mzDzYXbzS7rd3K6Fjb9RiZlYlJPam2/hU7JCBZBVEcywNuR+oZ1ncTvc/cq0faRr3P01OVg==",
+        "dependencies": {
+          "System.Runtime.CompilerServices.Unsafe": "4.5.3"
+        }
+      }
+    }
+  }
+}

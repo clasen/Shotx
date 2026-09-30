@@ -49,7 +49,7 @@
     <button id="reset" type="button">Borrar medición local</button>
 
     <script type="module">
-        import SxClient from '../client.js';
+        import SxClient from '../packages/shotx/client.js';
 
         const storageKey = 'shotx-room-reconnect-test:v1';
         const serverUrl = new URLSearchParams(location.search).get('server') || 'http://localhost:3000';

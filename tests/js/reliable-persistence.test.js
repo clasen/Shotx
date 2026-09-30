@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import assert from 'assert';
-import { SxServer } from '../index.js';
+import { SxServer } from 'shotx';
 
 const roomStore = 'sxReliableRooms';
 const clientStore = 'sxReliableClients';

@@ -1,4 +1,4 @@
-import SxClient from '../client.js';
+import SxClient from 'shotx/client';
 import { readFileSync } from 'fs';
 
 const client = new SxClient('http://localhost:3000', {}, { debug: 'debug' });

@@ -132,3 +132,10 @@ dist
 .DS_Store
 CLAUDE.md
 db/
+
+# .NET build output for the Unity client
+tests/dotnet/**/bin/
+tests/dotnet/**/obj/
+
+# Generated from the root README during npm packing
+packages/shotx/README.md

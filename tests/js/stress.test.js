@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SxServer } from '../index.js';
-import SxClient from '../client.js';
+import { SxServer } from 'shotx';
+import SxClient from 'shotx/client';
 
 const HOST = '127.0.0.1';
 

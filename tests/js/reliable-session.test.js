@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { it } from 'node:test';
-import SxServer from '../server.js';
-import SxClient from '../client.js';
+import SxServer from 'shotx/server';
+import SxClient from 'shotx/client';
 
 const timeoutMs = 5000;
 

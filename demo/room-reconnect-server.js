@@ -1,7 +1,7 @@
 import { createServer } from 'http';
 import { randomUUID } from 'crypto';
 import { resolve } from 'node:path';
-import { SxServer } from '../index.js';
+import { SxServer } from 'shotx';
 
 const port = Number(process.env.PORT || 3000);
 const intervalMs = Number(process.env.SHOTX_TEST_INTERVAL_MS || 250);

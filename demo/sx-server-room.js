@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import { resolve } from 'node:path';
-import { SxServer } from '../index.js';
+import { SxServer } from 'shotx';
 
 const server = createServer();
 const sxServer = new SxServer(server, {}, {

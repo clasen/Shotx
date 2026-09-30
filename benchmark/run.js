@@ -4,8 +4,8 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir, cpus, platform, arch } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import SxServer from '../server.js';
-import SxClient from '../client.js';
+import SxServer from 'shotx/server';
+import SxClient from 'shotx/client';
 
 const config = {
     clients: 20,

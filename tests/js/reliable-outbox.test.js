@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { it } from 'node:test';
-import SxClient from '../client.js';
+import SxClient from 'shotx/client';
 
 it('drains an outbox in sequence order and retains each record until its ACK', { timeout: 2000 }, async () => {
     const client = new SxClient();

@@ -2,8 +2,8 @@ import { createServer } from 'http';
 import { resolve as resolvePath } from 'node:path';
 import { describe, it, before, after } from 'node:test';
 import assert from 'assert';
-import { SxServer } from '../index.js';
-import SxClient from '../client.js';
+import { SxServer } from 'shotx';
+import SxClient from 'shotx/client';
 
 // ============ Helper ============
 

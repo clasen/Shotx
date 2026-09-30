@@ -1,7 +1,7 @@
 import { createServer } from 'http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, resolve } from 'node:path';
-import SxServer from '../server.js';
+import SxServer from 'shotx/server';
 
 const server = createServer();
 const sxServer = new SxServer(server, {}, {

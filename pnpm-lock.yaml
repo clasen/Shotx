@@ -11,6 +11,15 @@ overrides:
 importers:
 
   .:
+    devDependencies:
+      shotx:
+        specifier: workspace:*
+        version: link:packages/shotx
+      socket.io-client:
+        specifier: ^4.8.3
+        version: 4.8.3
+
+  packages/shotx:
     dependencies:
       deepbase:
         specifier: ^3.9.0
