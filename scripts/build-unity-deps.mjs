@@ -21,8 +21,11 @@ const suppliedByUnity = new Set([
 
 execFileSync('dotnet', ['restore', project, '--locked-mode'], { stdio: 'inherit' });
 const assets = JSON.parse(await readFile(join(dirname(project), 'obj/project.assets.json'), 'utf8'));
-const target = assets.targets['.NETStandard,Version=v2.1'];
-if (!target) throw new Error('Expected .NET Standard 2.1 dependency assets');
+// SDK 10.0.300 and later key targets by framework alias; earlier SDKs use the full framework name.
+const target = assets.targets['netstandard2.1'] ?? assets.targets['.NETStandard,Version=v2.1'];
+if (!target) {
+    throw new Error(`Expected .NET Standard 2.1 dependency assets, found: ${Object.keys(assets.targets).join(', ')}`);
+}
 
 const assemblies = new Map();
 const notices = new Map();
