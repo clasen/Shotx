@@ -50,6 +50,7 @@ export default class SxClient {
         this.reliableOutboundPending = new Map();
         this.reliableOutboundFlush = null;
         this.reliableOutboundBlocked = null;
+        this.reliableOutboxOperation = Promise.resolve();
         this.nextReliableOutboundSeq = 1;
 
         // Add default event name for routing
@@ -312,7 +313,8 @@ export default class SxClient {
             data,
             meta: { ...meta, stream: reliableId, seq },
             seq,
-            storedAt: Date.now()
+            storedAt: Date.now(),
+            emitted: false
         };
 
         if (this.useIndexedDB && this.db) {
@@ -360,16 +362,88 @@ export default class SxClient {
         this.reliableOutbox.delete(record.seq);
     }
 
+    async _markReliableRecordEmitted(record) {
+        if (this.useIndexedDB && this.db) {
+            const transaction = this.db.transaction([this.outboxStoreName], 'readwrite');
+            transaction.objectStore(this.outboxStoreName).put({ ...record, emitted: true });
+            await this._completeTransaction(transaction);
+        }
+        record.emitted = true;
+    }
+
+    _completeTransaction(transaction) {
+        return new Promise((resolve, reject) => {
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+        });
+    }
+
+    _runReliableOutboxOperation(operation) {
+        const result = this.reliableOutboxOperation.then(operation);
+        this.reliableOutboxOperation = result.catch(() => {});
+        return result;
+    }
+
+    // A new server history has no record of earlier sequences. Messages that never left the
+    // client are renumbered onto it; emitted ones may already have run, so they are dropped
+    // instead of repeated.
+    async _rebaseReliableOutbox(nextSeq, epoch) {
+        const reliableId = await this.reliableIdPromise;
+        const prefix = this._reliableOutboundPrefix(reliableId);
+        const records = [...this.reliableOutbox.values()].sort((left, right) => left.seq - right.seq);
+        const dropped = records.filter((record) => record.emitted !== false);
+        const rebased = records
+            .filter((record) => record.emitted === false)
+            .map((previous, index) => {
+                const seq = nextSeq + index;
+                return { previous, record: { ...previous, key: `${prefix}${seq}`, seq, meta: { ...previous.meta, seq } } };
+            });
+        const adoptedSeq = nextSeq + rebased.length;
+
+        if (this.useIndexedDB && this.db) {
+            const transaction = this.db.transaction([this.outboxStoreName, this.metadataStoreName], 'readwrite');
+            const outboxStore = transaction.objectStore(this.outboxStoreName);
+            for (const record of records) outboxStore.delete(record.key);
+            for (const { record } of rebased) outboxStore.put(record);
+            transaction.objectStore(this.metadataStoreName).put({
+                key: this._reliableOutboundSequenceKey(reliableId),
+                nextSeq: adoptedSeq,
+                epoch
+            });
+            await this._completeTransaction(transaction);
+        }
+
+        const pending = this.reliableOutboundPending;
+        this.reliableOutbox = new Map(rebased.map(({ record }) => [record.seq, record]));
+        this.reliableOutboundPending = new Map();
+        for (const { previous, record } of rebased) {
+            if (pending.has(previous.seq)) this.reliableOutboundPending.set(record.seq, pending.get(previous.seq));
+        }
+        for (const record of dropped) {
+            const waiter = pending.get(record.seq);
+            if (!waiter) continue;
+            if (waiter.timer) clearTimeout(waiter.timer);
+            const error = new Error('Reliable message may have run before the server history changed');
+            error.code = 'RELIABLE_RESYNC_REQUIRED';
+            waiter.reject(error);
+        }
+        this.nextReliableOutboundSeq = adoptedSeq;
+        this.reliableOutboundEpoch = epoch;
+        if (dropped.length > 0) {
+            this.log.warn(`> Dropped ${dropped.length} unacknowledged reliable messages after the server history changed`);
+        }
+    }
+
     async _adoptReliableServerSequence(nextSeq, epoch = null) {
         await this.reliableOutboxReady;
         const epochChanged = this.reliableOutboundEpoch !== undefined && this.reliableOutboundEpoch !== epoch;
+        if (epochChanged && this.reliableOutbox.size > 0) {
+            await this._rebaseReliableOutbox(nextSeq, epoch);
+            return;
+        }
         const firstPendingSeq = Math.min(...this.reliableOutbox.keys());
         if (Number.isFinite(firstPendingSeq)) {
-            if (epochChanged) {
-                const error = new Error('Reliable server history changed while client messages are pending');
-                error.code = 'RELIABLE_RESYNC_REQUIRED';
-                throw error;
-            }
             if (firstPendingSeq > nextSeq) {
                 const error = new Error(`Reliable client outbox is missing sequence ${nextSeq}`);
                 error.code = 'RELIABLE_RESYNC_REQUIRED';
@@ -418,17 +492,20 @@ export default class SxClient {
 
     async _sendReliableMessage(eventName, data, meta, { timeout } = {}) {
         if (this.reliableOutboundBlocked) throw this.reliableOutboundBlocked;
-        const record = await this._createReliableOutboundRecord(eventName, data, meta);
         const ms = timeout ?? this.timeout;
 
-        const delivery = new Promise((resolve, reject) => {
-            let timer;
-            if (ms > 0) {
-                timer = setTimeout(() => {
-                    reject(new Error(`TIMEOUT: ${meta.type || eventName} (${ms}ms)`));
-                }, ms);
-            }
-            this.reliableOutboundPending.set(record.seq, { resolve, reject, timer });
+        const { delivery } = await this._runReliableOutboxOperation(async () => {
+            const record = await this._createReliableOutboundRecord(eventName, data, meta);
+            const delivery = new Promise((resolve, reject) => {
+                let timer;
+                if (ms > 0) {
+                    timer = setTimeout(() => {
+                        reject(new Error(`TIMEOUT: ${meta.type || eventName} (${ms}ms)`));
+                    }, ms);
+                }
+                this.reliableOutboundPending.set(record.seq, { resolve, reject, timer });
+            });
+            return { delivery };
         });
         this._scheduleReliableOutboxFlush();
         return delivery;
@@ -457,6 +534,7 @@ export default class SxClient {
             for (const pending of this.reliableOutbox.values()) {
                 if (!record || pending.seq < record.seq) record = pending;
             }
+            if (!record.emitted) await this._markReliableRecordEmitted(record);
             const attempt = await this._emitReliableRecord(record);
             if (attempt.disconnected) return;
 
@@ -889,7 +967,7 @@ export default class SxClient {
                             || (epoch !== null && (typeof epoch !== 'string' || epoch.length === 0))) {
                             throw new Error('Invalid reliable server state');
                         }
-                        await this._adoptReliableServerSequence(nextSeq, epoch);
+                        await this._runReliableOutboxOperation(() => this._adoptReliableServerSequence(nextSeq, epoch));
                         if (this.socket !== socket || !this.isConnected) return;
                         this.serverReliable = true;
                         this._scheduleReliableOutboxFlush();

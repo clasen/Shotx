@@ -152,11 +152,46 @@ it('does not repeat an unacknowledged command against a new memory history', { t
     await first.close();
 
     const second = await test.start(first.port);
-    second.sx.onMessage('commit', () => { executions += 1; });
-    await assert.rejects(client.connect('token'), { code: 'RELIABLE_RESYNC_REQUIRED' });
+    second.sx.onMessage('commit', (data, socket, meta) => {
+        executions += 1;
+        return meta.seq;
+    });
+    await client.connect('token');
     await rejected;
     assert.equal(executions, 1);
-    assert.equal(client.reliableOutbox.size, 1);
+    assert.equal(client.reliableOutbox.size, 0);
+    assert.equal(await client.send('commit', {}), 1);
+    assert.equal(executions, 2);
+});
+
+it('renumbers commands queued while offline onto a new memory history', { timeout: 15000 }, async (t) => {
+    const test = await fixture(t);
+    const first = await test.start();
+    const client = test.client(first.port);
+    first.sx.onMessage('echo', (data, socket, meta) => meta.seq);
+    await client.connect('token');
+    assert.equal(await client.send('echo', {}), 1);
+    assert.equal(await client.send('echo', {}), 2);
+    await first.close();
+    await waitFor(() => !client.isConnected);
+
+    const queued = [client.send('echo', 'a'), client.send('echo', 'b')];
+    await waitFor(() => client.reliableOutbox.size === 2);
+    const ids = [...client.reliableOutbox.values()].map((record) => record.meta.id);
+
+    const second = await test.start(first.port);
+    const received = [];
+    second.sx.onMessage('echo', (data, socket, meta) => {
+        received.push({ data, id: meta.id, seq: meta.seq });
+        return meta.seq;
+    });
+    await client.connect('token');
+    assert.deepEqual(await Promise.all(queued), [1, 2]);
+    assert.deepEqual(received, [
+        { data: 'a', id: ids[0], seq: 1 },
+        { data: 'b', id: ids[1], seq: 2 }
+    ]);
+    assert.equal(await client.send('echo', 'c'), 3);
 });
 
 it('keeps the history identity with a persisted cursor and replaces its sequence after resynchronization', async () => {
