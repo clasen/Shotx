@@ -1,0 +1,9 @@
+<linker>
+  <!-- Newtonsoft and SocketIOClient create these types through reflection (state file, protocol messages). -->
+  <assembly fullname="Shotx" preserve="all" />
+  <assembly fullname="SocketIOClient" preserve="all" />
+  <assembly fullname="SocketIO.Core" preserve="all" />
+  <assembly fullname="SocketIO.Serializer.Core" preserve="all" />
+  <assembly fullname="SocketIO.Serializer.NewtonsoftJson" preserve="all" />
+  <assembly fullname="SocketIO.Serializer.SystemTextJson" preserve="all" />
+</linker>

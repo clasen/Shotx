@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 9.0.x
+      - run: pnpm install --frozen-lockfile
+      - name: JavaScript tests
+        run: pnpm test
+      - name: C# client tests
+        run: pnpm test:unity
+      - name: Bundled Unity dependencies match the lock file
+        run: |
+          pnpm build:unity-deps
+          git diff --exit-code -- packages/shotx-unity
+          test -z "$(git status --porcelain -- packages/shotx-unity)"
+      - name: npm package contains only the distribution
+        run: |
+          pnpm pack:npm
+          tar -tzf shotx-*.tgz | sort > "$RUNNER_TEMP/files.txt"
+          printf '%s\n' package/README.md package/client.js package/index.js package/package.json package/server.js | diff - "$RUNNER_TEMP/files.txt"

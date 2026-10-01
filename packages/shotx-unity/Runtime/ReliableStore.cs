@@ -36,13 +36,11 @@ namespace Shotx
                             $"Reliable state is in use by another SxClient: {_path}. Dispose it or configure a distinct Reliable.Id or StatePath.", error);
                     }
                 }
-                State = _path != null && File.Exists(_path)
-                    ? JsonConvert.DeserializeObject<ReliableState>(File.ReadAllText(_path), JsonSettings)
-                    : new ReliableState { Url = url, Id = id ?? UuidV7.New() };
-                Validate(State);
-                if (State.Url != url || (id != null && State.Id != id))
-                    throw new InvalidDataException("Reliable state belongs to a different server or consumer");
-                Commit(State);
+                var state = _path != null && File.Exists(_path) ? Load() : null;
+                state ??= new ReliableState { Url = url, Id = id ?? UuidV7.New(), EmittedSeq = 0 };
+                if (state.Url != url || (id != null && state.Id != id))
+                    throw new InvalidOperationException($"Reliable state belongs to a different server or consumer: {_path}");
+                Commit(state);
             }
             catch
             {
@@ -52,6 +50,29 @@ namespace Shotx
         }
 
         internal ReliableState State { get; private set; }
+
+        /// <summary>Where an unreadable state file was moved during construction; null when none was found.</summary>
+        internal string CorruptPath { get; private set; }
+
+        // Unreadable state is set aside for inspection rather than blocking the client forever.
+        // Its identity, cursors and pending messages are lost; I/O failures still propagate.
+        private ReliableState Load()
+        {
+            try
+            {
+                var state = JsonConvert.DeserializeObject<ReliableState>(File.ReadAllText(_path), JsonSettings);
+                Validate(state);
+                return state;
+            }
+            catch (Exception error) when (error is JsonException || error is InvalidDataException)
+            {
+                CorruptPath = _path + ".corrupt";
+                if (File.Exists(CorruptPath)) File.Delete(CorruptPath);
+                File.Move(_path, CorruptPath);
+                SxLog.Error($"Reliable state was unreadable and was moved to {CorruptPath}", error);
+                return null;
+            }
+        }
 
         internal ReliableState Copy() => JsonConvert.DeserializeObject<ReliableState>(JsonConvert.SerializeObject(State), JsonSettings);
 
@@ -79,7 +100,8 @@ namespace Shotx
         {
             if (state == null || state.Version != 1 || string.IsNullOrEmpty(state.Url) || string.IsNullOrEmpty(state.Id)
                 || state.NextSeq < 1 || state.NextSeq > MaxSequence || state.Cursors == null || state.Outbox == null
-                || (state.OutboundEpoch != null && state.OutboundEpoch.Length == 0))
+                || (state.OutboundEpoch != null && state.OutboundEpoch.Length == 0)
+                || state.EmittedSeq < 0 || state.EmittedSeq >= state.NextSeq)
                 throw new InvalidDataException("Invalid reliable state");
             foreach (var cursor in state.Cursors.Values)
             {
@@ -110,6 +132,9 @@ namespace Shotx
         public long NextSeq { get; set; } = 1;
         public bool HasOutboundEpoch { get; set; }
         public string OutboundEpoch { get; set; }
+        // Highest sequence ever transmitted. Only the earliest pending message can have been sent without an
+        // acknowledgement, so this tells which pending messages the server may have run. Null in older state files.
+        public long? EmittedSeq { get; set; }
         public Dictionary<string, ReliableCursor> Cursors { get; set; } = new Dictionary<string, ReliableCursor>();
         public SortedDictionary<long, JObject> Outbox { get; set; } = new SortedDictionary<long, JObject>();
     }

@@ -22,7 +22,8 @@ namespace Shotx
         private Exception _negotiationError;
         private Exception _outboundBlocked;
         private TaskCompletionSource<bool> _sessionEnded = NewSession();
-        private readonly Dictionary<long, TaskCompletionSource<JToken>> _outboundPending = new Dictionary<long, TaskCompletionSource<JToken>>();
+        // Keyed by message ID, which is stable while a sequence may still be reassigned before negotiation.
+        private readonly Dictionary<string, TaskCompletionSource<JToken>> _outboundPending = new Dictionary<string, TaskCompletionSource<JToken>>();
         private readonly Dictionary<string, ReliableRoom> _reliableRooms = new Dictionary<string, ReliableRoom>();
 
         private static TaskCompletionSource<bool> NewSession() =>
@@ -85,17 +86,57 @@ namespace Shotx
                     var nextSeq = (long)ready["nextSeq"];
                     var state = _reliableStore.Copy();
                     var epochChanged = state.HasOutboundEpoch && state.OutboundEpoch != _serverEpoch;
+                    var dropped = new List<JObject>();
+                    if (!state.HasOutboundEpoch || (epochChanged && state.Outbox.Count > 0))
+                    {
+                        // The server holds no record of these sequences: a client that never negotiated (since creation
+                        // or DiscardReliableOutbox) transmitted nothing, and a new server history forgot what it received.
+                        // Unsent messages take the server's next sequences; sent ones may already have run, so they are
+                        // dropped instead of repeated.
+                        long? firstQueued = null;
+                        foreach (var seq in state.Outbox.Keys) { firstQueued = seq; break; }
+                        var emittedSeq = state.EmittedSeq ?? firstQueued ?? 0;
+                        var renumbered = new SortedDictionary<long, JObject>();
+                        foreach (var queued in state.Outbox)
+                        {
+                            if (state.HasOutboundEpoch && queued.Key <= emittedSeq)
+                            {
+                                dropped.Add(queued.Value);
+                                continue;
+                            }
+                            if (nextSeq + renumbered.Count >= ReliableStore.MaxSequence) throw new InvalidOperationException("Reliable sequence exhausted");
+                            queued.Value["meta"]["seq"] = nextSeq + renumbered.Count;
+                            renumbered.Add(nextSeq + renumbered.Count, queued.Value);
+                        }
+                        state.Outbox = renumbered;
+                        state.NextSeq = nextSeq + renumbered.Count;
+                        state.EmittedSeq = nextSeq - 1;
+                    }
                     long? firstPending = null;
                     foreach (var seq in state.Outbox.Keys) { firstPending = seq; break; }
-                    if (firstPending.HasValue && epochChanged)
-                        throw ResyncError("Reliable server history changed while client messages are pending", ready);
                     if (firstPending > nextSeq || (!firstPending.HasValue && !epochChanged && state.NextSeq > nextSeq))
                         throw ResyncError($"Reliable server expects sequence {nextSeq}, client expects {firstPending ?? state.NextSeq}", ready);
 
-                    if (!firstPending.HasValue) state.NextSeq = nextSeq;
+                    if (!firstPending.HasValue)
+                    {
+                        state.NextSeq = nextSeq;
+                        state.EmittedSeq = nextSeq - 1;
+                    }
                     state.OutboundEpoch = _serverEpoch;
                     state.HasOutboundEpoch = true;
                     _reliableStore.Commit(state);
+                    if (dropped.Count > 0)
+                    {
+                        SxLog.Warn($"Dropped {dropped.Count} unacknowledged reliable messages after the server history changed");
+                        var error = ResyncError("Reliable message may have run before the server history changed", ready);
+                        foreach (var message in dropped)
+                        {
+                            var id = (string)message["meta"]["id"];
+                            if (!_outboundPending.TryGetValue(id, out var pending)) continue;
+                            _outboundPending.Remove(id);
+                            pending.TrySetException(error);
+                        }
+                    }
                     _reliableReady = true;
                     ScheduleOutbox();
                 }
@@ -121,10 +162,41 @@ namespace Shotx
 
         private static bool IsReliableApplication(string type) => !type.StartsWith("sx_", StringComparison.Ordinal);
 
+        /// <summary>
+        /// Removes every reliable message not yet acknowledged by the server and returns them in send order,
+        /// so the application can inspect or resend them after resynchronizing. Clears a blocked outbox;
+        /// the next connection adopts the server's sequence. Pending Send calls fail with RELIABLE_DISCARDED.
+        /// Requires a disconnected client.
+        /// </summary>
+        public IReadOnlyList<JObject> DiscardReliableOutbox()
+        {
+            lock (_gate)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(SxClient));
+                if (_socket != null) throw new InvalidOperationException("Disconnect before discarding the reliable outbox");
+                var state = _reliableStore.Copy();
+                var discarded = new List<JObject>(state.Outbox.Values);
+                state.Outbox.Clear();
+                state.HasOutboundEpoch = false;
+                state.OutboundEpoch = null;
+                _reliableStore.Commit(state);
+                _outboundBlocked = null;
+                _negotiationError = null;
+                var error = new SxException("Reliable message was discarded", "RELIABLE_DISCARDED");
+                foreach (var pending in _outboundPending.Values) pending.TrySetException(error);
+                _outboundPending.Clear();
+                return discarded;
+            }
+        }
+
+        /// <summary>Where an unreadable reliable state file was moved at construction; null when none was found.</summary>
+        public string CorruptStatePath => _reliableStore.CorruptPath;
+
         private Task<JToken> SendReliable(JObject message, TimeSpan timeout)
         {
             TaskCompletionSource<JToken> completion;
             long seq;
+            var id = (string)message["meta"]["id"];
             lock (_gate)
             {
                 if (_disposed) return Task.FromException<JToken>(new ObjectDisposedException(nameof(SxClient)));
@@ -145,14 +217,14 @@ namespace Shotx
                     return Task.FromException<JToken>(error);
                 }
                 completion = new TaskCompletionSource<JToken>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _outboundPending.Add(seq, completion);
+                _outboundPending.Add(id, completion);
                 ScheduleOutbox();
             }
-            return WaitForReliable(seq, completion.Task, timeout, (string)message["meta"]["type"]);
+            return WaitForReliable(id, completion.Task, timeout, (string)message["meta"]["type"]);
         }
 
         // A timeout abandons only the caller's wait; the persisted message is still delivered.
-        private async Task<JToken> WaitForReliable(long seq, Task<JToken> task, TimeSpan timeout, string type)
+        private async Task<JToken> WaitForReliable(string id, Task<JToken> task, TimeSpan timeout, string type)
         {
             try
             {
@@ -160,7 +232,7 @@ namespace Shotx
             }
             finally
             {
-                lock (_gate) _outboundPending.Remove(seq);
+                lock (_gate) _outboundPending.Remove(id);
             }
         }
 
@@ -187,6 +259,12 @@ namespace Shotx
                         if (_disposed || !_reliableReady || !_isConnected || _outboundBlocked != null) return;
                         foreach (var entry in _reliableStore.State.Outbox) { seq = entry.Key; message = entry.Value; break; }
                         if (message == null) return;
+                        if (!(seq <= _reliableStore.State.EmittedSeq))
+                        {
+                            var marked = _reliableStore.Copy();
+                            marked.EmittedSeq = seq;
+                            _reliableStore.Commit(marked);
+                        }
                         socket = _socket;
                         ended = _sessionEnded.Task;
                     }
@@ -213,9 +291,10 @@ namespace Shotx
                         var state = _reliableStore.Copy();
                         state.Outbox.Remove(seq);
                         _reliableStore.Commit(state);
-                        if (_outboundPending.TryGetValue(seq, out var pending))
+                        var id = (string)message["meta"]["id"];
+                        if (_outboundPending.TryGetValue(id, out var pending))
                         {
-                            _outboundPending.Remove(seq);
+                            _outboundPending.Remove(id);
                             if ((bool)meta["success"]) pending.TrySetResult(response["data"]);
                             else pending.TrySetException(new SxException((string)meta["error"] ?? "Unknown error", code));
                         }
@@ -261,7 +340,7 @@ namespace Shotx
 
         private ReliableRoom PrepareRoom(string room, long? afterSeq = null)
         {
-            if (!_reliableRooms.TryGetValue(room, out var state) || afterSeq.HasValue || state.Resync != null)
+            if (!_reliableRooms.TryGetValue(room, out var state) || afterSeq.HasValue)
             {
                 ReliableCursor cursor = null;
                 if (!afterSeq.HasValue) _reliableStore.State.Cursors.TryGetValue(room, out cursor);
@@ -286,16 +365,22 @@ namespace Shotx
             {
                 if (_disposed) throw new ObjectDisposedException(nameof(SxClient));
                 state = PrepareRoom(room, afterSeq);
-                request = new JObject { ["room"] = room, ["epoch"] = state.Epoch };
-                if (state.LastSeq.HasValue) request["afterSeq"] = state.LastSeq.Value;
+                request = JoinRequest(state);
             }
 
             var result = await Send("sx_join", request).ConfigureAwait(false);
-            if (result?["reliable"] is JObject reliable && (string)reliable["status"] == "resync_required")
+            if (LostHistory(result?["reliable"]) is JObject lost)
             {
-                var details = (JObject)reliable.DeepClone();
-                details["room"] = room;
-                throw ResyncError($"Reliable room requires resynchronization: {room}", details);
+                lock (_gate)
+                {
+                    if (_disposed) throw new ObjectDisposedException(nameof(SxClient));
+                    ResumeRoom(state, lost);
+                    request = JoinRequest(state);
+                }
+                result = await Send("sx_join", request).ConfigureAwait(false);
+                if (LostHistory(result?["reliable"]) is JObject again) throw RoomResyncError(room, again);
+                await NotifyResync(state, lost).ConfigureAwait(false);
+                return result;
             }
             if (afterSeq.HasValue)
             {
@@ -305,6 +390,34 @@ namespace Shotx
                 }
             }
             return result;
+        }
+
+        private static JObject JoinRequest(ReliableRoom state)
+        {
+            var request = new JObject { ["room"] = state.Room, ["epoch"] = state.Epoch };
+            if (state.LastSeq.HasValue) request["afterSeq"] = state.LastSeq.Value;
+            return request;
+        }
+
+        private static JObject LostHistory(JToken result) =>
+            result is JObject reliable && (string)reliable["status"] == "resync_required" ? reliable : null;
+
+        // The server no longer holds the history after this cursor (restart, expired retention or a reset store).
+        // Those messages are gone, so the room continues from the oldest one retained.
+        private void ResumeRoom(ReliableRoom state, JObject details)
+        {
+            if (!ValidSequence(details["earliestSeq"], 1)) throw new InvalidOperationException("Invalid reliable room history");
+            state.LastSeq = (long)details["earliestSeq"] - 1;
+            state.Epoch = _serverEpoch;
+            state.Buffer.Clear();
+            SaveCursor(state.Room, state.LastSeq.Value, state.Epoch);
+        }
+
+        private static SxException RoomResyncError(string room, JObject details)
+        {
+            var data = (JObject)details.DeepClone();
+            data["room"] = room;
+            return ResyncError($"Reliable room requires resynchronization: {room}", data);
         }
 
         private void ReceiveReliable(JObject message, JObject meta)
@@ -330,7 +443,7 @@ namespace Shotx
 
         private void ScheduleRoom(ReliableRoom state)
         {
-            if (_disposed || state.Resync != null || !state.LastSeq.HasValue) return;
+            if (_disposed || !state.LastSeq.HasValue) return;
             var next = state.LastSeq.Value + 1;
             if (!state.Draining && state.Buffer.ContainsKey(next))
             {
@@ -414,7 +527,7 @@ namespace Shotx
         }
 
         private bool IsCurrent(ReliableRoom state) =>
-            !_disposed && state.Resync == null && _reliableRooms.TryGetValue(state.Room, out var current) && current == state;
+            !_disposed && _reliableRooms.TryGetValue(state.Room, out var current) && current == state;
 
         private void SaveCursor(string room, long seq, string epoch)
         {
@@ -434,14 +547,22 @@ namespace Shotx
                 };
                 var reply = Deliver(socket, message, Options.Timeout);
                 if (await Task.WhenAny(reply, ended).ConfigureAwait(false) != reply || ended.IsCompleted) return;
-                if (await reply.ConfigureAwait(false) is JObject result && (string)result["status"] == "resync_required")
+                if (LostHistory(await reply.ConfigureAwait(false)) is JObject lost)
                 {
-                    await Deliver(socket, new JObject
+                    JObject request;
+                    lock (_gate)
                     {
-                        ["meta"] = new JObject { ["type"] = "sx_leave", ["id"] = UuidV7.New() },
-                        ["data"] = new JObject { ["room"] = state.Room }
+                        if (!IsCurrent(state)) return;
+                        ResumeRoom(state, lost);
+                        request = JoinRequest(state);
+                    }
+                    var rejoined = await Deliver(socket, new JObject
+                    {
+                        ["meta"] = new JObject { ["type"] = "sx_join", ["id"] = UuidV7.New() },
+                        ["data"] = request
                     }, Options.Timeout).ConfigureAwait(false);
-                    await NotifyResync(state, result).ConfigureAwait(false);
+                    if (LostHistory(rejoined?["reliable"]) is JObject again) throw RoomResyncError(state.Room, again);
+                    await NotifyResync(state, lost).ConfigureAwait(false);
                 }
             }
             catch (Exception error)
@@ -462,13 +583,10 @@ namespace Shotx
             lock (_gate)
             {
                 if (!IsCurrent(state)) return;
-                state.Resync = data;
-                state.Buffer.Clear();
-                _joinedRooms.Remove(state.Room);
                 _handlers.TryGetValue("sx_resync_required", out handler);
             }
 
-            SxLog.Warn($"Reliable room requires resynchronization: {state.Room}");
+            SxLog.Warn($"Reliable room {state.Room} resumed after losing its history");
             if (handler == null) return;
             try
             {
@@ -512,7 +630,6 @@ namespace Shotx
             internal string Epoch;
             internal bool Draining;
             internal bool Replaying;
-            internal JObject Resync;
             internal readonly SortedDictionary<long, JObject> Buffer = new SortedDictionary<long, JObject>();
         }
     }

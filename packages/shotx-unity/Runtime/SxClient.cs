@@ -139,7 +139,8 @@ namespace Shotx
 
         /// <summary>
         /// Joins a room, resuming reliable delivery from the persisted cursor, or after afterSeq when given.
-        /// Throws SxException RELIABLE_RESYNC_REQUIRED when the cursor is outside the retained history.
+        /// When the cursor is outside the retained history, the room resumes from the oldest retained message
+        /// and the sx_resync_required handler is told about the gap.
         /// </summary>
         public async Task<JToken> Join(string room, long? afterSeq = null)
         {
@@ -321,12 +322,6 @@ namespace Shotx
                 try
                 {
                     await JoinRoom(room, null).ConfigureAwait(false);
-                }
-                catch (SxException error) when (error.Code == ResyncCode)
-                {
-                    ReliableRoom state;
-                    lock (_gate) _reliableRooms.TryGetValue(room, out state);
-                    if (state != null) await NotifyResync(state, (JObject)error.Details).ConfigureAwait(false);
                 }
                 catch (Exception error)
                 {

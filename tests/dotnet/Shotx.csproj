@@ -16,6 +16,8 @@
   <ItemGroup>
     <PackageReference Include="SocketIOClient" Version="3.1.2" />
     <PackageReference Include="SocketIO.Serializer.NewtonsoftJson" Version="3.1.2" />
+    <!-- Pins the transitive dependency of SocketIOClient past GHSA-8g4q-xg66-9fp4 (fixed in 8.0.5). -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
 </Project>

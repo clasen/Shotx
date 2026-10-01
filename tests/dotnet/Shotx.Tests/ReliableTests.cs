@@ -86,7 +86,7 @@ namespace Shotx.Tests
         }
 
         [Test]
-        public async Task Join_RejectsExpiredCursor_AndAfterSeqRecovers()
+        public async Task Join_ResumesExpiredCursorFromRetainedHistory()
         {
             var room = Room();
             var path = StatePath();
@@ -102,22 +102,21 @@ namespace Shotx.Tests
 
             var second = Client(path);
             var after = Record(second, "notice");
+            var resync = Received(second, "sx_resync_required");
             await second.Connect("valid");
-            var error = Assert.ThrowsAsync<SxException>(() => second.Join(room));
+            await second.Join(room);
 
-            Assert.That(error.Code, Is.EqualTo("RELIABLE_RESYNC_REQUIRED"));
-            Assert.That((string)error.Details["reason"], Is.EqualTo("cursor_expired"));
-            Assert.That((string)error.Details["room"], Is.EqualTo(room));
-            Assert.That((long)error.Details["latestSeq"], Is.EqualTo(5));
-
-            await second.Join(room, afterSeq: 5);
+            var (data, _) = await WithPatience(resync);
+            Assert.That((string)data["reason"], Is.EqualTo("cursor_expired"));
+            Assert.That((string)data["room"], Is.EqualTo(room));
+            Assert.That((long)data["latestSeq"], Is.EqualTo(5));
             await Broadcast(sender, room, "m6");
-            await WaitUntil(() => after.Count == 1);
-            Assert.That(Values(after), Is.EqualTo(new[] { "m6" }));
+            await WaitUntil(() => after.Count == 4);
+            Assert.That(Values(after), Is.EqualTo(new[] { "m3", "m4", "m5", "m6" }));
         }
 
         [Test]
-        public async Task Rejoin_NotifiesResyncWhenHistoryExpiredWhileOffline()
+        public async Task Rejoin_ResumesRoomWhenHistoryExpiredWhileOffline()
         {
             var room = Room();
             var receiver = Client();
@@ -136,7 +135,8 @@ namespace Shotx.Tests
             var (data, _) = await WithPatience(resync);
             Assert.That((string)data["room"], Is.EqualTo(room));
             Assert.That((string)data["reason"], Is.EqualTo("cursor_expired"));
-            Assert.That(Values(received), Is.EqualTo(new[] { "m1" }));
+            await WaitUntil(() => received.Count == 4);
+            Assert.That(Values(received), Is.EqualTo(new[] { "m1", "m3", "m4", "m5" }));
         }
 
         [Test]
@@ -223,14 +223,87 @@ namespace Shotx.Tests
             Assert.Throws<InvalidOperationException>(() => Client(path));
         }
 
-        private SxClient Client(string statePath = null, bool send = false)
+        [Test]
+        public async Task Connect_RebasesUnsentMessagesAndDropsSentOnesWhenServerHistoryChanged()
+        {
+            var sent = Guid.NewGuid().ToString();
+            var unsent = Guid.NewGuid().ToString();
+            var path = StatePath();
+            var first = Client(path, send: true);
+            await first.Connect("valid");
+            await first.Send("echo", "acknowledged");
+            await first.Disconnect();
+            var pending = new[] { first.Send("count", new { key = sent }), first.Send("count", new { key = unsent }) };
+            first.Dispose();
+            foreach (var task in pending) Assert.ThrowsAsync<ObjectDisposedException>(() => task);
+            var saved = JObject.Parse(File.ReadAllText(path));
+            saved["OutboundEpoch"] = "previous-server-epoch";
+            saved["EmittedSeq"] = (long)saved["NextSeq"] - 2;
+            File.WriteAllText(path, saved.ToString());
+
+            var second = Client(path, send: true);
+            await second.Connect("valid");
+
+            Assert.That((int)await second.Send("counts", new { key = unsent }), Is.EqualTo(1));
+            Assert.That((int)await second.Send("counts", new { key = sent }), Is.EqualTo(0));
+            Assert.That((int)await second.Send("count", new { key = unsent }), Is.EqualTo(2));
+        }
+
+        [Test]
+        public async Task DiscardReliableOutbox_RequiresDisconnectedClient()
+        {
+            var client = Client(send: true);
+            await client.Connect("valid");
+
+            Assert.Throws<InvalidOperationException>(() => client.DiscardReliableOutbox());
+        }
+
+        [Test]
+        public async Task ReliableSend_QueuedBeforeFirstConnect_TakesServerSequence()
+        {
+            var id = Guid.NewGuid().ToString();
+            var key = Guid.NewGuid().ToString();
+            var first = Client(send: true, id: id);
+            await first.Connect("valid");
+            await first.Send("echo", "a");
+            await first.Send("echo", "b");
+            first.Dispose();
+
+            var second = Client(send: true, id: id);
+            var pending = second.Send("count", new { key });
+            await second.Connect("valid");
+
+            Assert.That((int)await WithPatience(pending), Is.EqualTo(1));
+            Assert.That((long)(await second.Send("echo", "c"))["meta"]["seq"], Is.EqualTo(4));
+        }
+
+        [TestCase("{not json")]
+        [TestCase("null")]
+        [TestCase("{}")]
+        public async Task CorruptState_IsSetAsideAndClientStartsClean(string content)
+        {
+            var path = StatePath();
+            Directory.CreateDirectory(_stateDirectory);
+            File.WriteAllText(path, content);
+
+            var client = Client(path, send: true);
+
+            Assert.That(client.CorruptStatePath, Is.EqualTo(path + ".corrupt"));
+            Assert.That(File.ReadAllText(client.CorruptStatePath), Is.EqualTo(content));
+            await client.Connect("valid");
+            Assert.That((string)(await client.Send("echo", "works"))["data"], Is.EqualTo("works"));
+            client.Dispose();
+            Assert.That(Client(path).CorruptStatePath, Is.Null);
+        }
+
+        private SxClient Client(string statePath = null, bool send = false, string id = null)
         {
             var client = new SxClient(_server.Url, new SxClientOptions
             {
                 Timeout = Patience,
                 ReconnectionDelay = 100,
                 ReconnectionDelayMax = 200,
-                Reliable = new SxReliableOptions { Enabled = send, StatePath = statePath }
+                Reliable = new SxReliableOptions { Enabled = send, StatePath = statePath, Id = id }
             });
             _clients.Add(client);
             return client;

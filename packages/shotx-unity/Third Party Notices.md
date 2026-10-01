@@ -2297,7 +2297,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## System.Text.Json/8.0.4
+## System.Text.Json/8.0.5
 
 ```text
 The MIT License (MIT)
