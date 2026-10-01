@@ -698,9 +698,6 @@ export default class SxClient {
                 this.log.info(`> Rejoined room: ${room}`);
             } catch (error) {
                 this.log.error(`> Failed to rejoin room ${room}:`, error);
-                if (error.code === 'RELIABLE_RESYNC_REQUIRED') {
-                    await this._notifyReliableResync(this.reliableRooms.get(room), error.details);
-                }
             }
         }
     }
@@ -709,16 +706,34 @@ export default class SxClient {
     async _joinRoom(room) {
         const state = await this._prepareReliableRoom(room);
         if (state.lastSeq === null) state.epoch = this.reliableServerEpoch;
-        const data = { room, epoch: state.epoch };
+        const result = await this._sendReliableJoin(state);
+        if (result?.reliable?.status !== 'resync_required') return result;
+
+        await this._resumeReliableRoom(state, result.reliable);
+        const resumed = await this._sendReliableJoin(state);
+        if (resumed?.reliable?.status === 'resync_required') {
+            throw this._createResyncError(room, resumed.reliable);
+        }
+        await this._notifyReliableResync(state, result.reliable);
+        return resumed;
+    }
+
+    _sendReliableJoin(state) {
+        const data = { room: state.room, epoch: state.epoch };
         if (state.lastSeq !== null) {
             data.afterSeq = state.lastSeq;
         }
+        return this.send('sx_join', data);
+    }
 
-        const result = await this.send('sx_join', data);
-        if (result?.reliable?.status === 'resync_required') {
-            throw this._createResyncError(room, result.reliable);
-        }
-        return result;
+    // The server no longer holds the history after this cursor (restart, expired retention or a
+    // reset store). Those messages are gone, so the room continues from the oldest one retained.
+    async _resumeReliableRoom(state, details) {
+        state.lastSeq = details.earliestSeq - 1;
+        state.epoch = this.reliableServerEpoch;
+        state.buffer.clear();
+        state.lastReplayFrom = null;
+        await this._saveReliableCursor(state.room, state.lastSeq, { replace: true, epoch: state.epoch });
     }
 
     async _prepareReliableRoom(room, afterSeq) {
@@ -736,8 +751,7 @@ export default class SxClient {
                 buffer: new Map(),
                 processing: Promise.resolve(),
                 replayPromise: null,
-                lastReplayFrom: null,
-                resyncRequired: null
+                lastReplayFrom: null
             };
             this.reliableRooms.set(room, state);
         }
@@ -768,8 +782,7 @@ export default class SxClient {
                 buffer: new Map(),
                 processing: Promise.resolve(),
                 replayPromise: null,
-                lastReplayFrom: null,
-                resyncRequired: null
+                lastReplayFrom: null
             };
             this.reliableRooms.set(stream, state);
         }
@@ -835,7 +848,7 @@ export default class SxClient {
     }
 
     _requestReliableReplay(state, fromSeq) {
-        if (!this.isConnected || state.replayPromise || state.lastReplayFrom === fromSeq || state.resyncRequired) {
+        if (!this.isConnected || state.replayPromise || state.lastReplayFrom === fromSeq) {
             return;
         }
 
@@ -843,7 +856,11 @@ export default class SxClient {
         state.replayPromise = this.send('sx_replay', { room: state.room, fromSeq, epoch: state.epoch })
             .then(async (result) => {
                 if (result?.status !== 'resync_required') return;
-                await this.send('sx_leave', { room: state.room });
+                await this._resumeReliableRoom(state, result);
+                const resumed = await this._sendReliableJoin(state);
+                if (resumed?.reliable?.status === 'resync_required') {
+                    throw this._createResyncError(state.room, resumed.reliable);
+                }
                 await this._notifyReliableResync(state, result);
             })
             .catch((error) => {
@@ -856,9 +873,7 @@ export default class SxClient {
     }
 
     async _notifyReliableResync(state, details) {
-        state.resyncRequired = details;
-        this.joinedRooms.delete(state.room);
-        this.log.error(`> Reliable room requires resynchronization: ${state.room}`, details);
+        this.log.warn(`> Reliable room ${state.room} resumed after losing its history`, details);
         const handler = this.messageHandlers.get('sx_resync_required');
         if (handler) {
             try {

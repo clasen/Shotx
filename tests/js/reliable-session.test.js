@@ -63,7 +63,7 @@ async function fixture(t) {
     };
 }
 
-it('requires room resynchronization after a memory restart even when sequence numbers match', { timeout: 15000 }, async (t) => {
+it('resumes a room from the new history after a memory restart even when sequence numbers match', { timeout: 15000 }, async (t) => {
     const test = await fixture(t);
     const first = await test.start();
     const client = test.client(first.port, false);
@@ -83,10 +83,9 @@ it('requires room resynchronization after a memory restart even when sequence nu
     await client.connect('token');
     assert.equal(resyncs.length, 1);
     assert.equal(resyncs[0].reason, 'server_restarted');
-    assert.deepEqual(received, ['before restart']);
-    assert.equal(client.joinedRooms.has('room'), false);
+    assert.equal(client.joinedRooms.has('room'), true);
 
-    await client.join('room', { afterSeq: 0 });
+    await waitFor(() => received.length === 2);
     await second.sx.to('room').send('feed', 'next message');
     await waitFor(() => received.length === 3);
     assert.deepEqual(received, ['before restart', 'after restart', 'next message']);

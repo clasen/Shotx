@@ -1220,7 +1220,7 @@ describe('Reliable delivery', function () {
         await cleanup(secondServer.httpServer, client);
     });
 
-    it('reports when a saved cursor is older than the retained log', async function () {
+    it('resumes from the retained log when a saved cursor is older than it', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
             reliable: { ...reliable, maxMessagesPerRoom: 2 }
         });
@@ -1231,20 +1231,24 @@ describe('Reliable delivery', function () {
         await sxServer.to(room).send('event', { number: 3 });
 
         const client = createReliableClient(port, 'expired-client');
+        const received = [];
+        const notifications = [];
         await client.connect('token');
-        client.onMessage('event', () => {});
-        await assert.rejects(
-            () => client.join(room, { afterSeq: 0 }),
-            (error) => error.code === 'RELIABLE_RESYNC_REQUIRED'
-        );
+        client.onMessage('event', ({ number }) => received.push(number));
+        client.onMessage('sx_resync_required', (details) => notifications.push(details));
+        await client.join(room, { afterSeq: 0 });
+        await waitFor(() => received.length === 2);
+        assert.deepStrictEqual(received, [2, 3]);
+        assert.strictEqual(notifications.length, 1);
+        assert.strictEqual(notifications[0].reason, 'cursor_expired');
         const serverSocket = [...sxServer.io.sockets.sockets.values()][0];
-        assert.strictEqual(serverSocket.rooms.has(room), false);
+        assert.strictEqual(serverSocket.rooms.has(room), true);
 
         await sxServer.db.del('sxReliableRooms', room);
         await cleanup(httpServer, client);
     });
 
-    it('reports an expired room on automatic reconnect and restores the other rooms', async function () {
+    it('resumes an expired room on automatic reconnect along with the other rooms', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
             reliable: { ...reliable, maxMessagesPerRoom: 2 }
         });
@@ -1283,19 +1287,16 @@ describe('Reliable delivery', function () {
             await sxServer.to(otherRoom).send('event', 'recovered');
             releaseAuth();
 
-            await waitFor(() => notifications.length === 1 && received.includes('recovered'));
+            await waitFor(() => notifications.length === 1 && received.length === 4);
             assert.strictEqual(notifications[0].room, room);
             assert.strictEqual(notifications[0].reason, 'cursor_expired');
-            assert.strictEqual(client.joinedRooms.has(room), false);
+            assert.strictEqual(client.joinedRooms.has(room), true);
             assert.strictEqual(client.joinedRooms.has(otherRoom), true);
             const socket = [...sxServer.io.sockets.sockets.values()][0];
-            assert.strictEqual(socket.rooms.has(room), false);
+            assert.strictEqual(socket.rooms.has(room), true);
             assert.strictEqual(socket.rooms.has(otherRoom), true);
-            assert.deepStrictEqual(received, [1, 'recovered']);
-
-            await client.join(room, { afterSeq: 2 });
-            await waitFor(() => received.length === 4);
-            assert.deepStrictEqual(received, [1, 'recovered', 3, 4]);
+            assert.deepStrictEqual(received.filter((value) => typeof value === 'number'), [1, 3, 4]);
+            assert.ok(received.includes('recovered'));
         } finally {
             releaseAuth();
             await sxServer.db.del('sxReliableRooms', room);
@@ -1304,7 +1305,7 @@ describe('Reliable delivery', function () {
         }
     });
 
-    it('stops a live stream when a detected gap is no longer retained', async function () {
+    it('resumes a live stream from the retained log when a detected gap expired', async function () {
         const { httpServer, sxServer, port } = await createTestServer({}, {
             reliable: { ...reliable, maxMessagesPerRoom: 2 }
         });
@@ -1330,11 +1331,11 @@ describe('Reliable delivery', function () {
         await serverSocket.join(room);
         await sxServer.to(room).send('event', { number: 5 });
 
-        await waitFor(() => resync !== undefined);
-        assert.deepStrictEqual(received, [1]);
+        await waitFor(() => resync !== undefined && received.length === 3);
+        assert.deepStrictEqual(received, [1, 4, 5]);
         assert.strictEqual(resync.reason, 'cursor_expired');
-        assert.strictEqual(serverSocket.rooms.has(room), false);
-        assert.strictEqual(client.joinedRooms.has(room), false);
+        assert.strictEqual(serverSocket.rooms.has(room), true);
+        assert.strictEqual(client.joinedRooms.has(room), true);
 
         await sxServer.db.del('sxReliableRooms', room);
         await cleanup(httpServer, client);
